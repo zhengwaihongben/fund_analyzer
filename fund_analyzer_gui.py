@@ -86,6 +86,17 @@ class FundAnalyzerGUI:
         ttk.Entry(param, textvariable=self.output_var, width=30).grid(
             row=1, column=3, columnspan=3, sticky="we", padx=(0, 0), pady=4)
 
+        # row 2：起始日期
+        ttk.Label(param, text="起始日期:").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=4)
+        self.start_date_var = tk.StringVar()   # 留空 = 从成立日追踪
+        ttk.Entry(param, textvariable=self.start_date_var, width=14).grid(
+            row=2, column=1, sticky="w", padx=(0, 16), pady=4)
+
+        ttk.Label(param,
+                text="格式 YYYY-MM-DD，留空 = 從基金成立日追蹤",
+                foreground="#888888").grid(
+            row=2, column=2, columnspan=4, sticky="w", padx=(0, 0), pady=4)
+
         # 讓輸出目錄這一列能自動伸展
         param.columnconfigure(3, weight=1)
 
@@ -207,11 +218,26 @@ class FundAnalyzerGUI:
         benchmark = self.bench_var.get().strip() or None
         output_dir = Path(self.output_var.get().strip() or "output")
 
+        # 解析起始日期（支持多种格式）
+        start_date_raw = self.start_date_var.get().strip()
+        start_date = None
+        if start_date_raw:
+            start_date = self._parse_date(start_date_raw)
+            if start_date is None:
+                messagebox.showerror(
+                    "錯誤",
+                    f"起始日期格式無法識別：{start_date_raw}\n\n"
+                    f"請使用 YYYY-MM-DD，例如 2023-01-01。\n"
+                    f"留空則從基金成立日開始追蹤。"
+                )
+                return
+
         cfg = {
-            "risk_free": rf,
-            "benchmark": benchmark,
-            "aum":       aum,
-            "aum_date":  datetime.now().strftime("%Y-%m-%d"),
+            "risk_free":  rf,
+            "benchmark":  benchmark,
+            "aum":        aum,
+            "aum_date":   datetime.now().strftime("%Y-%m-%d"),
+            "start_date": start_date,
         }
 
         # 重置 UI
@@ -233,6 +259,19 @@ class FundAnalyzerGUI:
             args=(fund_code, output_dir, cfg, self.ignore_cache_var.get()),
             daemon=True,
         ).start()
+
+    @staticmethod
+    def _parse_date(s: str):
+        """解析日期字符串，支持多种常见格式。失败返回 None。"""
+        s = s.strip()
+        if not s:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
 
     def _run_analysis(self, fund_code, output_dir, cfg, no_cache):
         try:

@@ -71,9 +71,11 @@ python fund_analyzer_gui.py
 After launching:
 
 1. Enter a **fund code** (6 digits, e.g. `017436`)
-2. Optionally fill in **AUM** (億元), **risk-free rate**, and **benchmark**
-3. Click **▶ Start Analysis**
-4. Wait for the log to finish, then double-click any file in the result list to open it
+2. Optionally fill in **AUM** (亿元), **risk-free rate**, and **benchmark**
+3. Optionally set a **start date** (`YYYY-MM-DD`) to limit the tracking range;
+   leave it empty to track from the fund's inception
+4. Click **▶ Start Analysis**
+5. Wait for the log to finish, then double-click any file in the result list to open it
 
 **Windows shortcut** — double-click `launch.vbs` to launch the GUI without a terminal window.
 
@@ -97,6 +99,7 @@ python fund_analyzer.py <fund_code> [options]
 | `--benchmark CODE` | `.NDX` | Benchmark index; pass `""` to skip IR calculation |
 | `--risk-free RATE` | `0.02` | Annual risk-free rate |
 | `--aum VALUE` | — | Fund AUM in 亿元 (optional) |
+| `--start-date DATE` | — | Tracking start date (YYYY-MM-DD); empty = from inception |
 | `--no-cache` | — | Ignore holdings cache, force refresh |
 | `--show` | — | Open all HTML reports in browser after generating |
 | `-v, --verbose` | — | Verbose logging |
@@ -104,7 +107,11 @@ python fund_analyzer.py <fund_code> [options]
 **Example:**
 
 ```bash
+# Full analysis from inception
 python fund_analyzer.py 017436 --aum 47.06 --risk-free 0.02 --benchmark .NDX --show
+
+# Track only from a specific date
+python fund_analyzer.py 017436 --start-date 2023-01-01 --aum 47.06 --show
 ```
 
 ## Output

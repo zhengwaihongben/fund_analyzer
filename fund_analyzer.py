@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "benchmark":    ".NDX",
     "aum":          None,
     "aum_date":     None,
+    "start_date":   None,
 }
 
 COLOR_MAP = {
@@ -65,7 +66,8 @@ def setup_logging(verbose=False):
 # ============================================================
 # 1. 淨值數據
 # ============================================================
-def fetch_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
+def fetch_nav(fund_code: str, save_dir: Path,
+              start_date: str = None) -> pd.DataFrame:
     log.info(f"[{fund_code}] 获取历史净值 ...")
     try:
         raw = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
@@ -88,7 +90,6 @@ def fetch_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
             date_col = cand
             break
     if date_col is None:
-        # 兜底：第一列当日期
         date_col = raw.columns[0]
         log.warning(f"[{fund_code}] 未找到日期列，使用第一列: {date_col}")
 
@@ -102,7 +103,6 @@ def fetch_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
             nav_col = cand
             break
     if nav_col is None:
-        # 兜底：排除 Date 后，取第一个数值型列
         numeric_cols = [c for c in raw.columns
                         if c != "Date" and pd.api.types.is_numeric_dtype(raw[c])]
         if numeric_cols:
@@ -124,6 +124,20 @@ def fetch_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
     raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
     raw["NAV"] = pd.to_numeric(raw["NAV"], errors="coerce")
     raw = raw.dropna(subset=["Date", "NAV"]).sort_values("Date").reset_index(drop=True)
+
+    # ---------- 按起始日期筛选（新增） ----------
+    if start_date:
+        try:
+            sd = pd.to_datetime(start_date)
+            before = len(raw)
+            raw = raw[raw["Date"] >= sd].reset_index(drop=True)
+            log.info(f"[{fund_code}] 按起始日期 {start_date} 筛选: {before} → {len(raw)} 条")
+            if raw.empty:
+                log.error(f"[{fund_code}] 起始日期 {start_date} 之后无数据，"
+                          f"请检查日期是否晚于基金成立日")
+                return pd.DataFrame()
+        except Exception as e:
+            log.warning(f"[{fund_code}] 起始日期解析失败 '{start_date}': {e}，使用全部数据")
 
     out = save_dir / f"{fund_code}_daily_nav.csv"
     raw.to_csv(out, index=False, encoding="utf-8-sig")
@@ -188,7 +202,7 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFra
                 log.info(f"[{fund_code}] {year} 年持倉: {len(df)} 條")
         except Exception as e:
             log.warning(f"[{fund_code}] {year} 年持倉獲取失敗: {e}")
-        time.sleep(1.5)   # 每年之間停 1.5 秒
+        
 
     if not all_holdings:
         log.warning(f"[{fund_code}] 無持倉數據")
@@ -637,7 +651,10 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
                "generated_at": datetime.now().isoformat(timespec="seconds")}
 
     # 1. 淨值（硬依賴）
-    nav_df = fetch_nav(fund_code, save_dir)
+    start_date = cfg.get("start_date")
+    if start_date:
+        log.info(f"[{fund_code}] 起始追蹤日期: {start_date}")
+    nav_df = fetch_nav(fund_code, save_dir, start_date=start_date)
     if nav_df.empty:
         log.error(f"[{fund_code}] 無淨值數據，終止")
         return summary
@@ -698,6 +715,8 @@ def main():
                         help="年化無風險利率（默認 0.02）")
     parser.add_argument("--aum", type=float, default=None,
                         help="基金規模（億元），可選，手動傳入")
+    parser.add_argument("--start-date", default=None,
+                        help="起始追蹤日期（YYYY-MM-DD），留空則從成立日開始")
     parser.add_argument("--no-cache", action="store_true",
                         help="忽略持倉緩存，強製重新拉取")
     parser.add_argument("--show", action="store_true",
@@ -708,10 +727,11 @@ def main():
     setup_logging(args.verbose)
 
     cfg = {
-        "risk_free": args.risk_free,
-        "benchmark": args.benchmark or None,
-        "aum":       args.aum,
-        "aum_date":  datetime.now().strftime("%Y-%m-%d"),
+        "risk_free":  args.risk_free,
+        "benchmark":  args.benchmark or None,
+        "aum":        args.aum,
+        "aum_date":   datetime.now().strftime("%Y-%m-%d"),
+        "start_date": args.start_date,
     }
 
     analyze_fund(
