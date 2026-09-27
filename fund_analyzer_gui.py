@@ -96,6 +96,21 @@ class FundAnalyzerGUI:
                 text="格式 YYYY-MM-DD，留空 = 從基金成立日追蹤",
                 foreground="#888888").grid(
             row=2, column=2, columnspan=4, sticky="w", padx=(0, 0), pady=4)
+        
+        # row 3：基准市场
+        ttk.Label(param, text="基準市場:").grid(row=3, column=0, sticky="w", padx=(0, 4), pady=4)
+        self.bench_market_var = tk.StringVar(value="auto")
+        market_combo = ttk.Combobox(
+            param, textvariable=self.bench_market_var,
+            values=["auto", "us", "cn", "hk"],
+            state="readonly", width=8,
+        )
+        market_combo.grid(row=3, column=1, sticky="w", padx=(0, 16), pady=4)
+
+        ttk.Label(param,
+                text="auto=自動判斷（.NDX=美股，sh000300=A股，HSI=港股）",
+                foreground="#888888").grid(
+            row=3, column=2, columnspan=4, sticky="w", padx=(0, 0), pady=4)
 
         # 讓輸出目錄這一列能自動伸展
         param.columnconfigure(3, weight=1)
@@ -104,14 +119,14 @@ class FundAnalyzerGUI:
         btns = ttk.Frame(self.root)
         btns.pack(fill="x", padx=10, pady=5)
 
-        self.run_btn = ttk.Button(btns, text="▶  開始分析", command=self.start_analysis)
+        self.run_btn = ttk.Button(btns, text="開始分析", command=self.start_analysis)
         self.run_btn.pack(side="left", padx=(0, 6))
 
-        self.open_all_btn = ttk.Button(btns, text="🌐  打開所有報告",
+        self.open_all_btn = ttk.Button(btns, text="打開所有報告",
                                         command=self.open_all_reports, state="disabled")
         self.open_all_btn.pack(side="left", padx=(0, 6))
 
-        self.open_dir_btn = ttk.Button(btns, text="📂  打開輸出目錄",
+        self.open_dir_btn = ttk.Button(btns, text="打開輸出目錄",
                                         command=self.open_output_dir, state="disabled")
         self.open_dir_btn.pack(side="left", padx=(0, 6))
 
@@ -235,6 +250,7 @@ class FundAnalyzerGUI:
         cfg = {
             "risk_free":  rf,
             "benchmark":  benchmark,
+            "benchmark_market": self.bench_market_var.get() or "auto",
             "aum":        aum,
             "aum_date":   datetime.now().strftime("%Y-%m-%d"),
             "start_date": start_date,
@@ -292,11 +308,28 @@ class FundAnalyzerGUI:
         self.is_running = False
         self.run_btn.configure(state="normal")
 
+        # 情况 1：线程里抛了异常
         if error:
             self.status_var.set("分析失敗")
             messagebox.showerror("錯誤", f"分析失敗：\n\n{error}")
             return
 
+        # 情况 2：函数内部提前终止（比如无净值数据）
+        if not summary.get("success", False):
+            msg = summary.get("error") or "未知原因"
+            self.status_var.set(f"分析失敗：{msg}")
+            messagebox.showerror(
+                "分析失敗",
+                f"基金 {summary.get('fund_code', '?')} 分析未完成。\n\n"
+                f"原因：{msg}\n\n"
+                f"提示：\n"
+                f"  • 檢查基金代碼是否正確\n"
+                f"  • 換個時間重試（數據源可能臨時抽風）\n"
+                f"  • 起始日期不要晚於最新淨值日期"
+            )
+            return
+
+        # 情况 3：真正成功
         out_dir = Path(summary.get("output_dir", "."))
         if not out_dir.exists():
             self.status_var.set("分析完成，但輸出目錄不存在")
@@ -316,7 +349,7 @@ class FundAnalyzerGUI:
         for f in files:
             label = f.name
             self.result_files[label] = f
-            prefix = "  🌐 " if f.suffix == ".html" else "  📄 "
+            prefix = "  [HTML] " if f.suffix == ".html" else "  [FILE] "
             self.result_listbox.insert("end", prefix + label)
 
         n_html = sum(1 for p in self.result_files.values() if p.suffix == ".html")
@@ -324,7 +357,7 @@ class FundAnalyzerGUI:
             self.open_all_btn.configure(state="normal")
 
         self.status_var.set(
-            f"✅ 分析完成 — {len(self.result_files)} 個文件（{n_html} 個 HTML 報告）"
+            f"分析完成 — {len(self.result_files)} 個文件（{n_html} 個 HTML 報告）"
         )
         messagebox.showinfo(
             "完成",
@@ -343,7 +376,7 @@ class FundAnalyzerGUI:
             return
         label = self.result_listbox.get(sel[0]).strip()
         # 去掉前綴 emoji
-        for prefix in ("🌐", "📄"):
+        for prefix in ("[HTML]", "[FILE]"):
             if label.startswith(prefix):
                 label = label[len(prefix):].strip()
         path = self.result_files.get(label)
