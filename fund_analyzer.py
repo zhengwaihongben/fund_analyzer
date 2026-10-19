@@ -375,7 +375,7 @@ def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
 # ============================================================
 def compute_technical(df: pd.DataFrame, cfg: dict,
                       save_dir: Path, fund_code: str) -> pd.DataFrame:
-    log.info(f"[{fund_code}] 计算 SMA / BOLL ...")
+    log.info(f"[{fund_code}] 计算 SMA / BOLL / RSI / MACD ...")
     for w in cfg["sma_windows"]:
         df[f"SMA{w}"] = df["NAV"].rolling(window=w, min_periods=1).mean()
 
@@ -384,6 +384,23 @@ def compute_technical(df: pd.DataFrame, cfg: dict,
     df["BOLL_Std"]   = df["NAV"].rolling(window=n, min_periods=1).std()
     df["BOLL_Upper"] = df["BOLL_Mid"] + k * df["BOLL_Std"]
     df["BOLL_Lower"] = df["BOLL_Mid"] - k * df["BOLL_Std"]
+
+    # 计算 RSI (默认周期 14)
+    delta = df["NAV"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+    df["RSI"] = df["RSI"].fillna(50)
+
+    # 新增：计算 MACD (12, 26, 9)
+    exp12 = df["NAV"].ewm(span=12, adjust=False).mean()
+    exp26 = df["NAV"].ewm(span=26, adjust=False).mean()
+    df["MACD_DIF"] = exp12 - exp26
+    df["MACD_DEA"] = df["MACD_DIF"].ewm(span=9, adjust=False).mean()
+    df["MACD_Hist"] = (df["MACD_DIF"] - df["MACD_DEA"]) * 2  # A股习惯乘2，更直观
 
     out = save_dir / f"{fund_code}_daily_nav_sma_boll.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
@@ -394,114 +411,120 @@ def compute_technical(df: pd.DataFrame, cfg: dict,
 
 def plot_technical(df: pd.DataFrame, cfg: dict,
                    fund_code: str, save_dir: Path) -> Path:
-    log.info(f"[{fund_code}] 生成 SMA/BOLL 交互图 ...")
+    log.info(f"[{fund_code}] 生成 SMA/BOLL/RSI/MACD 交互图 ...")
     windows = cfg["sma_windows"]
-    fig = go.Figure()
+    
+    # 创建上中下三个子图，共享 X 轴
+    fig = make_subplots(
+        rows=3, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.03,
+        row_heights=[0.6, 0.2, 0.2],  # 主图占 60%，MACD 20%，RSI 20%
+        subplot_titles=(f"{fund_code} · NAV / SMA / BOLL", "MACD (12, 26, 9)", "RSI (14)")
+    )
 
-    # --- trace 0: NAV ---
+    # ================= 行 1: 主图 =================
     fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["NAV"],
-        mode="lines",
-        name="NAV (Unit Net Value)",
+        x=df["Date"], y=df["NAV"], mode="lines", name="NAV",
         line=dict(color=COLOR_MAP["NAV"], width=1.2),
         hovertemplate="%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>",
         visible=True,
-    ))
+    ), row=1, col=1)
 
-    # --- trace 1~N: SMA（lines + markers）---
     for w in windows:
         key = f"SMA{w}"
         fig.add_trace(go.Scatter(
-            x=df["Date"], y=df[key],
-            mode="lines+markers",
-            name=f"SMA {w}",
+            x=df["Date"], y=df[key], mode="lines", name=f"SMA {w}",
             line=dict(color=COLOR_MAP[key], width=1.6),
-            marker=dict(size=3, color=COLOR_MAP[key]),
             hovertemplate=f"%{{x|%Y-%m-%d}}<br>SMA {w}: %{{y:.4f}}<extra></extra>",
             visible=True,
-        ))
+        ), row=1, col=1)
 
-    # --- BOLL Upper ---
     fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Upper"],
-        mode="lines+markers",
-        name="BOLL Upper",
+        x=df["Date"], y=df["BOLL_Upper"], mode="lines", name="BOLL Upper",
         line=dict(color="rgba(214,39,40,0.9)", width=1.4),
-        marker=dict(size=3, color="rgba(214,39,40,0.9)"),
         hovertemplate="%{x|%Y-%m-%d}<br>Upper: %{y:.4f}<extra></extra>",
         visible=False,
-    ))
+    ), row=1, col=1)
 
-    # --- BOLL Lower（fill 到 Upper 之间）---
     fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Lower"],
-        mode="lines+markers",
-        name="BOLL Lower",
+        x=df["Date"], y=df["BOLL_Lower"], mode="lines", name="BOLL Lower",
         line=dict(color="rgba(214,39,40,0.9)", width=1.4),
-        marker=dict(size=3, color="rgba(214,39,40,0.9)"),
-        fill="tonexty",
-        fillcolor="rgba(214,39,40,0.10)",
+        fill="tonexty", fillcolor="rgba(214,39,40,0.10)",
         hovertemplate="%{x|%Y-%m-%d}<br>Lower: %{y:.4f}<extra></extra>",
         visible=False,
-    ))
+    ), row=1, col=1)
 
-    # --- BOLL Mid ---
     fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Mid"],
-        mode="lines+markers",
-        name="BOLL Mid (SMA 20)",
-        line=dict(color="#1f77b4", width=1.8),
-        marker=dict(size=3, color="#1f77b4"),
+        x=df["Date"], y=df["BOLL_Mid"], mode="lines", name="BOLL Mid",
+        line=dict(color="#1f77b4", width=1.8, dash="dash"),
         hovertemplate="%{x|%Y-%m-%d}<br>Mid: %{y:.4f}<extra></extra>",
         visible=False,
-    ))
+    ), row=1, col=1)
 
-    # --- visible 数组 ---
-    sma_visible  = [True] * (1 + len(windows)) + [False, False, False]
-    boll_visible = [True] + [False] * len(windows) + [True, True, True]
+    # ================= 行 2: MACD =================
+    # MACD 柱状图（红涨绿跌）
+    colors = ['#ef5350' if val > 0 else '#26a69a' for val in df["MACD_Hist"]]
+    fig.add_trace(go.Bar(
+        x=df["Date"], y=df["MACD_Hist"], name="MACD Hist",
+        marker_color=colors, opacity=0.7,
+        hovertemplate="%{x|%Y-%m-%d}<br>Hist: %{y:.4f}<extra></extra>",
+    ), row=2, col=1)
 
-    # --- 按钮切换 ---
+    # DIF 线（快线）
+    fig.add_trace(go.Scatter(
+        x=df["Date"], y=df["MACD_DIF"], mode="lines", name="DIF",
+        line=dict(color="#1f77b4", width=1.2),
+        hovertemplate="%{x|%Y-%m-%d}<br>DIF: %{y:.4f}<extra></extra>",
+    ), row=2, col=1)
+
+    # DEA 线（慢线）
+    fig.add_trace(go.Scatter(
+        x=df["Date"], y=df["MACD_DEA"], mode="lines", name="DEA",
+        line=dict(color="#ff9800", width=1.2),
+        hovertemplate="%{x|%Y-%m-%d}<br>DEA: %{y:.4f}<extra></extra>",
+    ), row=2, col=1)
+
+    # ================= 行 3: RSI =================
+    fig.add_trace(go.Scatter(
+        x=df["Date"], y=df["RSI"], mode="lines", name="RSI (14)",
+        line=dict(color="#8e44ad", width=1.4),
+        hovertemplate="%{x|%Y-%m-%d}<br>RSI: %{y:.2f}<extra></extra>",
+    ), row=3, col=1)
+    
+    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=3, col=1)
+
+    # ================= 按钮显隐逻辑 =================
+    # 索引顺序：0:NAV, 1~5:SMA, 6~8:BOLL, 9:MACD Hist, 10:DIF, 11:DEA, 12:RSI (共 13 个)
+    # 注意：副图（MACD和RSI）的 trace 永远设为 True，不受按钮影响
+    sma_visible  = [True] * 6 + [False] * 3 + [True] * 4
+    boll_visible = [True] + [False] * 5 + [True] * 3 + [True] * 4
+
     fig.update_layout(
         updatemenus=[dict(
             type="buttons", direction="right",
-            x=0.0, y=1.12, xanchor="left", yanchor="top",
+            x=0.0, y=1.05, xanchor="left", yanchor="top",
             showactive=True, active=0,
             bgcolor="#f0f0f0", bordercolor="#cccccc", font=dict(size=13),
             buttons=[
                 dict(
                     label="SMA",
                     method="update",
-                    args=[
-                        {"visible": sma_visible},
-                        {"title.text": (
-                            f"{fund_code}"
-                            f"<br><sup>NAV with SMA 5 / 10 / 60 / 120 / 250</sup>"
-                        )},
-                    ],
+                    args=[{"visible": sma_visible}, {"title.text": f"{fund_code} · SMA / MACD / RSI"}],
                 ),
                 dict(
                     label="BOLL",
                     method="update",
-                    args=[
-                        {"visible": boll_visible},
-                        {"title.text": (
-                            f"{fund_code}"
-                            f"<br><sup>NAV with Bollinger Bands (20, 2σ)</sup>"
-                        )},
-                    ],
+                    args=[{"visible": boll_visible}, {"title.text": f"{fund_code} · BOLL / MACD / RSI"}],
                 ),
             ],
         )],
-        title=dict(
-            text=(
-                f"{fund_code}"
-                f"<br><sup>NAV with SMA 5 / 10 / 60 / 120 / 250</sup>"
-            ),
-            font=dict(size=18),
-        ),
-        xaxis=dict(
-            title="Date",
-            rangeslider=dict(visible=True),
+        title=dict(text=f"{fund_code} · SMA / MACD / RSI", font=dict(size=17)),
+        xaxis=dict(rangeslider=dict(visible=False), type="date"),
+        xaxis2=dict(rangeslider=dict(visible=False), type="date"),
+        xaxis3=dict(
+            rangeslider=dict(visible=True),  # 最下方保留滑块
             type="date",
             tickformatstops=[
                 dict(dtickrange=[None, 604800000], value="%Y-%m-%d"),
@@ -511,15 +534,13 @@ def plot_technical(df: pd.DataFrame, cfg: dict,
             ],
             hoverformat="%Y-%m-%d",
         ),
-        yaxis=dict(
-            title="Unit NAV (CNY)",
-            autorange=True,
-            fixedrange=False,
-        ),
+        yaxis=dict(title="Unit NAV", autorange=True, fixedrange=False),
+        yaxis2=dict(title="MACD", zeroline=True, zerolinecolor="#888"),
+        yaxis3=dict(title="RSI", range=[0, 100], tickvals=[0, 30, 50, 70, 100]),
         hovermode="x unified",
         template="plotly_white",
-        height=700,
-        margin=dict(l=60, r=40, t=150, b=60),
+        height=900,  # 整体拉高以容纳 3 个图
+        margin=dict(l=60, r=40, t=100, b=60),
         legend=dict(
             orientation="h",
             yanchor="bottom", y=1.02,
@@ -528,11 +549,11 @@ def plot_technical(df: pd.DataFrame, cfg: dict,
             bordercolor="#cccccc", borderwidth=1,
         ),
     )
+    
     out = save_dir / f"{fund_code}_nav_sma_boll.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] SMA/BOLL 图 → {out.name}")
+    log.info(f"[{fund_code}] SMA/BOLL/MACD/RSI 图 → {out.name}")
     return out
-
 
 # ============================================================
 # 4. 风险指标
