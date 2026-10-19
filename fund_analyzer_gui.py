@@ -17,6 +17,8 @@ from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 from datetime import datetime
 import time
+import webview  # 需要先 pip install pywebview
+import threading
 
 # 導入核心邏輯
 from fund_analyzer import analyze_fund
@@ -63,14 +65,14 @@ class FundAnalyzerGUI:
         param = ttk.LabelFrame(self.root, text=" 分析參數 ", padding=10)
         param.pack(fill="x", padx=10, pady=(10, 5))
 
-        # row 0
+        # row 0 (移除 AUM，调整排版)
         ttk.Label(param, text="基金代碼:").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=4)
         self.code_var = tk.StringVar()
         ttk.Entry(param, textvariable=self.code_var, width=14).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=4)
 
-        ttk.Label(param, text="無風險利率:").grid(row=0, column=4, sticky="w", padx=(0, 4), pady=4)
+        ttk.Label(param, text="無風險利率:").grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
         self.rf_var = tk.StringVar(value="0.02")
-        ttk.Entry(param, textvariable=self.rf_var, width=8).grid(row=0, column=5, sticky="w", pady=4)
+        ttk.Entry(param, textvariable=self.rf_var, width=8).grid(row=0, column=3, sticky="w", pady=4)
 
         # row 1
         ttk.Label(param, text="基準指數:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=4)
@@ -111,15 +113,15 @@ class FundAnalyzerGUI:
         # 讓輸出目錄這一列能自動伸展
         param.columnconfigure(3, weight=1)
 
-        # ---- 按鈕列 ----
+        # ---- 按鈕列 ---- (确保这里定义了 btns)
         btns = ttk.Frame(self.root)
         btns.pack(fill="x", padx=10, pady=5)
 
         self.run_btn = ttk.Button(btns, text="開始分析", command=self.start_analysis)
         self.run_btn.pack(side="left", padx=(0, 6))
 
-        self.open_all_btn = ttk.Button(btns, text="打開所有報告",
-                                        command=self.open_all_reports, state="disabled")
+        self.open_all_btn = ttk.Button(btns, text="📊 打开综合报告(视窗)",
+                                        command=self.open_master_report, state="disabled")
         self.open_all_btn.pack(side="left", padx=(0, 6))
 
         self.open_dir_btn = ttk.Button(btns, text="打開輸出目錄",
@@ -302,19 +304,11 @@ class FundAnalyzerGUI:
             messagebox.showerror("錯誤", f"分析失敗：\n\n{error}")
             return
 
-        # 情况 2：函数内部提前终止（比如无净值数据）
+        # 情况 2：函数内部提前终止
         if not summary.get("success", False):
             msg = summary.get("error") or "未知原因"
             self.status_var.set(f"分析失敗：{msg}")
-            messagebox.showerror(
-                "分析失敗",
-                f"基金 {summary.get('fund_code', '?')} 分析未完成。\n\n"
-                f"原因：{msg}\n\n"
-                f"提示：\n"
-                f"  • 檢查基金代碼是否正確\n"
-                f"  • 換個時間重試（數據源可能臨時抽風）\n"
-                f"  • 起始日期不要晚於最新淨值日期"
-            )
+            messagebox.showerror("分析失敗", f"基金 {summary.get('fund_code', '?')} 分析未完成。\n\n原因：{msg}")
             return
 
         # 情况 3：真正成功
@@ -326,6 +320,11 @@ class FundAnalyzerGUI:
         self._output_dir = out_dir
         self.open_dir_btn.configure(state="normal")
 
+        # 生成汇总报告
+        from fund_analyzer import generate_master_report
+        master_path = generate_master_report(summary["fund_code"], out_dir)
+        self._master_report_path = master_path
+
         # 收集文件（按類型 + 名稱排序）
         exts_order = {".html": 0, ".csv": 1, ".json": 2}
         files = sorted(
@@ -334,26 +333,28 @@ class FundAnalyzerGUI:
             key=lambda p: (exts_order[p.suffix.lower()], p.name),
         )
 
+        # 忽略不需要展示的特定文件
+        ignore_list = ["trend.html", "excess_return.html"]
+
         for f in files:
+            if any(x in f.name for x in ignore_list) and f.name != master_path.name:
+                continue
+            
             label = f.name
             self.result_files[label] = f
             prefix = "  [HTML] " if f.suffix == ".html" else "  [FILE] "
             self.result_listbox.insert("end", prefix + label)
 
+        # 补上缺失的 n_html 变量定义
         n_html = sum(1 for p in self.result_files.values() if p.suffix == ".html")
-        if n_html:
-            self.open_all_btn.configure(state="normal")
+        self.open_all_btn.configure(state="normal")
 
         self.status_var.set(
             f"分析完成 — {len(self.result_files)} 個文件（{n_html} 個 HTML 報告）"
         )
-        messagebox.showinfo(
-            "完成",
-            f"分析完成！\n\n"
-            f"輸出目錄：\n{out_dir.resolve()}\n\n"
-            f"生成 {len(self.result_files)} 個文件，其中 {n_html} 個 HTML 報告。\n\n"
-            f"雙擊列表中的文件即可打開，或點擊「打開所有報告」。"
-        )
+
+        # 直接自动打开 Webview 视窗
+        self.open_master_report()
 
     # --------------------------------------------------------
     # 事件處理
@@ -381,6 +382,25 @@ class FundAnalyzerGUI:
                 opened += 1
         if opened:
             self.status_var.set(f"已打開 {opened} 個 HTML 報告")
+
+    def open_master_report(self):
+        if not hasattr(self, "_master_report_path") or not self._master_report_path.exists():
+            messagebox.showwarning("提示", "综合报告尚未生成。")
+            return
+
+        # pywebview 创建独立的桌面视窗
+        try:
+            window = webview.create_window(
+                title="Fund Analyzer 综合报告",
+                url=self._master_report_path.as_uri(),
+                width=1280,
+                height=900,
+                background_color="#f0f2f5"
+            )
+            webview.start()
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开视窗: {e}\n将回退到默认浏览器。")
+            webbrowser.open(self._master_report_path.as_uri())
 
     def open_output_dir(self):
         if self._output_dir and self._output_dir.exists():
