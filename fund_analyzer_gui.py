@@ -68,10 +68,6 @@ class FundAnalyzerGUI:
         self.code_var = tk.StringVar()
         ttk.Entry(param, textvariable=self.code_var, width=14).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=4)
 
-        ttk.Label(param, text="AUM (億元):").grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
-        self.aum_var = tk.StringVar()
-        ttk.Entry(param, textvariable=self.aum_var, width=10).grid(row=0, column=3, sticky="w", padx=(0, 16), pady=4)
-
         ttk.Label(param, text="無風險利率:").grid(row=0, column=4, sticky="w", padx=(0, 4), pady=4)
         self.rf_var = tk.StringVar(value="0.02")
         ttk.Entry(param, textvariable=self.rf_var, width=8).grid(row=0, column=5, sticky="w", pady=4)
@@ -219,12 +215,6 @@ class FundAnalyzerGUI:
                 return
 
         try:
-            aum = float(self.aum_var.get()) if self.aum_var.get().strip() else None
-        except ValueError:
-            messagebox.showerror("錯誤", "AUM 必須是數字（可留空）。")
-            return
-
-        try:
             rf = float(self.rf_var.get())
         except ValueError:
             messagebox.showerror("錯誤", "無風險利率必須是數字。")
@@ -251,11 +241,9 @@ class FundAnalyzerGUI:
             "risk_free":  rf,
             "benchmark":  benchmark,
             "benchmark_market": self.bench_market_var.get() or "auto",
-            "aum":        aum,
-            "aum_date":   datetime.now().strftime("%Y-%m-%d"),
             "start_date": start_date,
         }
-
+        
         # 重置 UI
         self.result_listbox.delete(0, "end")
         self.result_files = {}

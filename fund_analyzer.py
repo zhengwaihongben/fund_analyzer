@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Fund Analyzer — 輸入基金代碼，一鍵輸出净值、持倉、技術指標、風險指標
+Fund Analyzer — 输入基金代码，一键输出净值、持仓、技术指标、风险指标
 
 Usage:
     python fund_analyzer.py 017436
@@ -36,8 +36,6 @@ DEFAULT_CONFIG = {
     "boll_k":       2,
     "benchmark":    ".NDX",
     "benchmark_market": "auto",
-    "aum":          None,
-    "aum_date":     None,
     "start_date":   None,
 }
 
@@ -65,19 +63,38 @@ def setup_logging(verbose=False):
 
 
 # ============================================================
-# 1. 净值數據
+# 1. 净值数据
 # ============================================================
+def fetch_aum(fund_code: str) -> tuple:
+    """从雪球接口自动获取基金最新规模。返回 (规模亿元, 日期)。失败返回 (None, None)。"""
+    try:
+        info = ak.fund_individual_basic_info_xq(symbol=fund_code)
+        # 提取最新规模
+        aum_series = info.loc[info['item'] == '最新规模', 'value']
+        if not aum_series.empty:
+            aum_str = aum_series.values[0]
+            # 提取数字（部分接口返回如 "47.06亿" 的字符串）
+            import re
+            match = re.search(r"[\d\.]+", str(aum_str))
+            if match:
+                aum = float(match.group())
+                log.info(f"[{fund_code}] 自动获取最新规模: {aum} 亿元")
+                return aum, datetime.now().strftime("%Y-%m-%d")
+    except Exception as e:
+        log.warning(f"[{fund_code}] 自动获取规模失败: {e}")
+    return None, None
+
 def fetch_nav(fund_code: str, save_dir: Path,
               start_date: str = None) -> pd.DataFrame:
-    log.info(f"[{fund_code}] 獲取歷史净值 ...")
+    log.info(f"[{fund_code}] 获取历史净值 ...")
     try:
         raw = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
     except Exception as e:
-        log.error(f"[{fund_code}] 净值獲取失敗: {e}")
+        log.error(f"[{fund_code}] 净值获取失败: {e}")
         return pd.DataFrame()
 
     if raw is None or raw.empty:
-        log.warning(f"[{fund_code}] 净值數據爲空")
+        log.warning(f"[{fund_code}] 净值数据为空")
         return pd.DataFrame()
 
     # ---------- 清理列名：去 BOM、去首尾空格 ----------
@@ -96,7 +113,7 @@ def fetch_nav(fund_code: str, save_dir: Path,
 
     raw = raw.rename(columns={date_col: "Date"})
 
-    # ---------- 净值列：按優先級匹配 ----------
+    # ---------- 净值列：按优先级匹配 ----------
     nav_candidates = ["单位净值", "单位净值走势", "净值", "NAV", "nav"]
     nav_col = None
     for cand in nav_candidates:
@@ -110,59 +127,59 @@ def fetch_nav(fund_code: str, save_dir: Path,
             nav_col = numeric_cols[0]
             log.warning(f"[{fund_code}] 未匹配到净值列名，使用: {nav_col}")
         else:
-            log.error(f"[{fund_code}] 無法識別净值列，實際列名: {raw.columns.tolist()}")
+            log.error(f"[{fund_code}] 无法识别净值列，实际列名: {raw.columns.tolist()}")
             return pd.DataFrame()
 
     raw = raw.rename(columns={nav_col: "NAV"})
 
-    # ---------- 日增长率（可選） ----------
+    # ---------- 日增长率（可选） ----------
     for cand in ["日增长率", "增长率", "DailyReturn"]:
         if cand in raw.columns:
             raw = raw.rename(columns={cand: "DailyReturn"})
             break
 
-    # ---------- 類型轉換 ----------
+    # ---------- 类型转换 ----------
     raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce")
     raw["NAV"] = pd.to_numeric(raw["NAV"], errors="coerce")
     raw = raw.dropna(subset=["Date", "NAV"]).sort_values("Date").reset_index(drop=True)
 
-    # ---------- 按起始日期篩選（新增） ----------
+    # ---------- 按起始日期筛选（新增） ----------
     if start_date:
         try:
             sd = pd.to_datetime(start_date)
             before = len(raw)
             raw = raw[raw["Date"] >= sd].reset_index(drop=True)
-            log.info(f"[{fund_code}] 按起始日期 {start_date} 篩選: {before} → {len(raw)} 條")
+            log.info(f"[{fund_code}] 按起始日期 {start_date} 筛选: {before} → {len(raw)} 条")
             if raw.empty:
-                log.error(f"[{fund_code}] 起始日期 {start_date} 之後無數據，"
-                          f"請檢查日期是否晚於基金成立日")
+                log.error(f"[{fund_code}] 起始日期 {start_date} 之后无数据，"
+                          f"请检查日期是否晚于基金成立日")
                 return pd.DataFrame()
         except Exception as e:
-            log.warning(f"[{fund_code}] 起始日期解析失敗 ''{start_date}'': {e}，使用全部數據")
+            log.warning(f"[{fund_code}] 起始日期解析失败 ''''{start_date}'''': {e}，使用全部数据")
 
     out = save_dir / f"{fund_code}_daily_nav.csv"
     raw.to_csv(out, index=False, encoding="utf-8-sig")
-    log.info(f"[{fund_code}] 净值 {len(raw)} 條 → {out.name}")
+    log.info(f"[{fund_code}] 净值 {len(raw)} 条 → {out.name}")
     return raw
 
 def fetch_benchmark(symbol: str, market: str = "auto") -> pd.DataFrame:
     """
-    統一獲取基準指數數據。
-    返回 DataFrame 帶兩列：Date (datetime)、BenchClose (float)。
-    失敗時返回空 DataFrame。
+    统一获取基准指数数据。
+    返回 DataFrame 带两列：Date (datetime)、BenchClose (float)。
+    失败时返回空 DataFrame。
 
-    market 參數：
-        "auto" — 根據 symbol 格式自動判斷
-        "us"   — 美股（新浪接口），symbol 以 . 開頭，如 .NDX
-        "cn"   — A股（東財接口），symbol 形如 sh000300
-        "hk"   — 港股（東財接口），symbol 形如 HSI
+    market 参数：
+        "auto" — 根据 symbol 格式自动判断
+        "us"   — 美股（新浪接口），symbol 以 . 开头，如 .NDX
+        "cn"   — A股（东财接口），symbol 形如 sh000300
+        "hk"   — 港股（东财接口），symbol 形如 HSI
     """
     if not symbol:
         return pd.DataFrame()
 
     symbol = symbol.strip()
 
-    # ---------- 自動判斷市場 ----------
+    # ---------- 自动判断市场 ----------
     if market == "auto":
         if symbol.startswith("."):
             market = "us"
@@ -171,7 +188,7 @@ def fetch_benchmark(symbol: str, market: str = "auto") -> pd.DataFrame:
         else:
             market = "hk"
 
-    log.info(f"獲取基準指數: {symbol} (市場: {market})")
+    log.info(f"获取基准指数: {symbol} (市场: {market})")
 
     try:
         if market == "us":
@@ -184,14 +201,14 @@ def fetch_benchmark(symbol: str, market: str = "auto") -> pd.DataFrame:
             df = ak.stock_hk_index_daily_em(symbol=symbol)
             df = df.rename(columns={"date": "Date", "close": "BenchClose"})
         else:
-            log.warning(f"未知市場類型: {market}")
+            log.warning(f"未知市场类型: {market}")
             return pd.DataFrame()
     except Exception as e:
-        log.warning(f"基準 {symbol} 獲取失敗: {e}")
+        log.warning(f"基准 {symbol} 获取失败: {e}")
         return pd.DataFrame()
 
     if df is None or df.empty:
-        log.warning(f"基準 {symbol} 返回空數據")
+        log.warning(f"基准 {symbol} 返回空数据")
         return pd.DataFrame()
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -200,7 +217,7 @@ def fetch_benchmark(symbol: str, market: str = "auto") -> pd.DataFrame:
     return df[["Date", "BenchClose"]]
 
 def plot_trend(df: pd.DataFrame, fund_code: str, save_dir: Path) -> Path:
-    log.info(f"[{fund_code}] 生成净值趨勢圖 ...")
+    log.info(f"[{fund_code}] 生成净值趋势图 ...")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df["Date"], y=df["NAV"],
@@ -230,20 +247,20 @@ def plot_trend(df: pd.DataFrame, fund_code: str, save_dir: Path) -> Path:
     )
     out = save_dir / f"{fund_code}_trend.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] 趨勢圖 → {out.name}")
+    log.info(f"[{fund_code}] 趋势图 → {out.name}")
     return out
 
 
 # ============================================================
-# 2. 持倉
+# 2. 持仓
 # ============================================================
 def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFrame:
     cache_path = save_dir / f"{fund_code}_holdings_raw.csv"
     if use_cache and cache_path.exists():
-        log.info(f"[{fund_code}] 從緩存讀取持倉: {cache_path.name}")
+        log.info(f"[{fund_code}] 从缓存读取持仓: {cache_path.name}")
         return pd.read_csv(cache_path, dtype=str)
 
-    log.info(f"[{fund_code}] 獲取歷史持倉 ...")
+    log.info(f"[{fund_code}] 获取历史持仓 ...")
     current_year = datetime.now().year
     years = [str(y) for y in range(current_year - 3, current_year + 1)]
 
@@ -253,25 +270,25 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFra
             df = ak.fund_portfolio_hold_em(symbol=fund_code, date=year)
             if df is not None and not df.empty:
                 all_holdings.append(df)
-                log.info(f"[{fund_code}] {year} 年持倉: {len(df)} 條")
+                log.info(f"[{fund_code}] {year} 年持仓: {len(df)} 条")
         except Exception as e:
-            log.warning(f"[{fund_code}] {year} 年持倉獲取失敗: {e}")
+            log.warning(f"[{fund_code}] {year} 年持仓获取失败: {e}")
         
 
     if not all_holdings:
-        log.warning(f"[{fund_code}] 無持倉數據")
+        log.warning(f"[{fund_code}] 无持仓数据")
         return pd.DataFrame()
 
     holdings = pd.concat(all_holdings, ignore_index=True)
     holdings.to_csv(cache_path, index=False, encoding="utf-8-sig")
-    log.info(f"[{fund_code}] 持倉 {len(holdings)} 條 → {cache_path.name}")
+    log.info(f"[{fund_code}] 持仓 {len(holdings)} 条 → {cache_path.name}")
     return holdings
 
 
 def _clean_holdings(holdings: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
         "股票代码": "StockCode", "股票名称": "Stock",
-        "佔净值比例": "Weight", "持股数": "Shares",
+        "占净值比例": "Weight", "持股数": "Shares",
         "持仓市值": "MarketValue", "季度": "Quarter",
     }
     holdings = holdings.rename(
@@ -297,11 +314,11 @@ def _clean_holdings(holdings: pd.DataFrame) -> pd.DataFrame:
 def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
     if holdings.empty:
         return None
-    log.info(f"[{fund_code}] 生成持倉堆疊麵積圖 ...")
+    log.info(f"[{fund_code}] 生成持仓堆叠面积图 ...")
 
     holdings = _clean_holdings(holdings)
     if "Weight" not in holdings.columns or "QuarterLabel" not in holdings.columns:
-        log.warning(f"[{fund_code}] 持倉數據字段不足，跳過繪圖")
+        log.warning(f"[{fund_code}] 持仓数据字段不足，跳过绘图")
         return None
 
     clean_path = save_dir / f"{fund_code}_holdings_clean.csv"
@@ -314,7 +331,7 @@ def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
             .reset_index(drop=True))
     top_stocks = latest["Stock"].tolist()
 
-    log.info(f"[{fund_code}] 最新季度 {latest_q} 前十大重倉股:")
+    log.info(f"[{fund_code}] 最新季度 {latest_q} 前十大重仓股:")
     for i, row in latest.iterrows():
         code   = row["StockCode"]
         name   = row["Stock"]
@@ -349,16 +366,16 @@ def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
     )
     out = save_dir / f"{fund_code}_holdings_area.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] 持倉圖 → {out.name}")
+    log.info(f"[{fund_code}] 持仓图 → {out.name}")
     return out
 
 
 # ============================================================
-# 3. 技術指標
+# 3. 技术指标
 # ============================================================
 def compute_technical(df: pd.DataFrame, cfg: dict,
                       save_dir: Path, fund_code: str) -> pd.DataFrame:
-    log.info(f"[{fund_code}] 計算 SMA / BOLL ...")
+    log.info(f"[{fund_code}] 计算 SMA / BOLL ...")
     for w in cfg["sma_windows"]:
         df[f"SMA{w}"] = df["NAV"].rolling(window=w, min_periods=1).mean()
 
@@ -371,15 +388,13 @@ def compute_technical(df: pd.DataFrame, cfg: dict,
     out = save_dir / f"{fund_code}_daily_nav_sma_boll.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
 
-    out = save_dir / f"{fund_code}_daily_nav_sma_boll.csv"
-    df.to_csv(out, index=False, encoding="utf-8-sig")
-    log.info(f"[{fund_code}] 技術指標 CSV → {out.name}")
+    log.info(f"[{fund_code}] 技术指标 CSV → {out.name}")
     return df
 
 
 def plot_technical(df: pd.DataFrame, cfg: dict,
                    fund_code: str, save_dir: Path) -> Path:
-    log.info(f"[{fund_code}] 生成 SMA/BOLL 交互圖 ...")
+    log.info(f"[{fund_code}] 生成 SMA/BOLL 交互图 ...")
     windows = cfg["sma_windows"]
     fig = go.Figure()
 
@@ -417,7 +432,7 @@ def plot_technical(df: pd.DataFrame, cfg: dict,
         visible=False,
     ))
 
-    # --- BOLL Lower（fill 到 Upper 之間）---
+    # --- BOLL Lower（fill 到 Upper 之间）---
     fig.add_trace(go.Scatter(
         x=df["Date"], y=df["BOLL_Lower"],
         mode="lines+markers",
@@ -441,11 +456,11 @@ def plot_technical(df: pd.DataFrame, cfg: dict,
         visible=False,
     ))
 
-    # --- visible 數組 ---
+    # --- visible 数组 ---
     sma_visible  = [True] * (1 + len(windows)) + [False, False, False]
     boll_visible = [True] + [False] * len(windows) + [True, True, True]
 
-    # --- 按鈕切換 ---
+    # --- 按钮切换 ---
     fig.update_layout(
         updatemenus=[dict(
             type="buttons", direction="right",
@@ -515,16 +530,16 @@ def plot_technical(df: pd.DataFrame, cfg: dict,
     )
     out = save_dir / f"{fund_code}_nav_sma_boll.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] SMA/BOLL 圖 → {out.name}")
+    log.info(f"[{fund_code}] SMA/BOLL 图 → {out.name}")
     return out
 
 
 # ============================================================
-# 4. 風險指標
+# 4. 风险指标
 # ============================================================
 def compute_risk_metrics(df: pd.DataFrame, cfg: dict, fund_code: str,
                          benchmark: str = None, aum: float = None) -> dict:
-    log.info(f"[{fund_code}] 計算風險指標 ...")
+    log.info(f"[{fund_code}] 计算风险指标 ...")
     rf = cfg["risk_free"]
     td = cfg["trading_days"]
 
@@ -533,7 +548,7 @@ def compute_risk_metrics(df: pd.DataFrame, cfg: dict, fund_code: str,
     ret = df["DailyRet"].dropna()
 
     if len(ret) < 30:
-        log.warning(f"[{fund_code}] 有效收益率不足 30 條，跳過指標計算")
+        log.warning(f"[{fund_code}] 有效收益率不足 30 条，跳过指标计算")
         return {}
 
     cum = (1 + ret).prod()
@@ -567,7 +582,7 @@ def compute_risk_metrics(df: pd.DataFrame, cfg: dict, fund_code: str,
                 info_ratio = ann_active / te if te > 0 else np.nan
                 ir_source = benchmark
         except Exception as e:
-            log.warning(f"[{fund_code}] 基準 {benchmark} 獲取失敗: {e}")
+            log.warning(f"[{fund_code}] 基准 {benchmark} 获取失败: {e}")
 
     def r(x, n=4):
         return round(float(x), n) if x is not None and not np.isnan(x) else None
@@ -609,7 +624,7 @@ def compute_risk_metrics(df: pd.DataFrame, cfg: dict, fund_code: str,
 def plot_risk_metrics(df: pd.DataFrame, metrics: dict,
                       fund_code: str, save_dir: Path,
                       aum: float = None, aum_date: str = None) -> Path:
-    log.info(f"[{fund_code}] 生成風險指標圖 ...")
+    log.info(f"[{fund_code}] 生成风险指标图 ...")
     df = df.copy()
     nav = df["NAV"]
     dd = ((nav - nav.cummax()) / nav.cummax()) * 100
@@ -633,7 +648,7 @@ def plot_risk_metrics(df: pd.DataFrame, metrics: dict,
         fill="tozeroy", fillcolor="rgba(200,120,120,0.12)",
     ), row=2, col=1)
 
-    # 指標卡片
+    # 指标卡片
     sh = metrics.get("sharpe")
     so = metrics.get("sortino")
     ca = metrics.get("calmar")
@@ -652,9 +667,9 @@ def plot_risk_metrics(df: pd.DataFrame, metrics: dict,
         bordercolor="#cccccc", borderwidth=1,
     )
 
-    # 副標題帶 AUM（可選）
+    # 副标题带 AUM（可选）
     if aum is not None:
-        sub = f"Risk-Adjusted Performance Metrics | AUM: {aum} 億元"
+        sub = f"Risk-Adjusted Performance Metrics | AUM: {aum} 亿元"
         if aum_date:
             sub += f" ({aum_date})"
     else:
@@ -677,32 +692,32 @@ def plot_risk_metrics(df: pd.DataFrame, metrics: dict,
 
     out = save_dir / f"{fund_code}_risk_metrics.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] 風險指標圖 → {out.name}")
+    log.info(f"[{fund_code}] 风险指标图 → {out.name}")
     return out
 
 def plot_excess_return(df: pd.DataFrame, fund_code: str, save_dir: Path,
                        benchmark: str, benchmark_market: str = "auto") -> Path:
     """
-    繪製基金相對基準的累計超額收益曲線。
+    绘制基金相对基准的累计超额收益曲线。
 
-    計算方法（幾何累加）：
-        基金累計净值   = (1 + 基金日收益).cumprod()
-        基準累計净值   = (1 + 基準日收益).cumprod()
-        累計超額收益   = 基金累計净值 / 基準累計净值 - 1
+    计算方法（几何累加）：
+        基金累计净值   = (1 + 基金日收益).cumprod()
+        基准累计净值   = (1 + 基准日收益).cumprod()
+        累计超额收益   = 基金累计净值 / 基准累计净值 - 1
     """
-    log.info(f"[{fund_code}] 生成累計超額收益曲線 (基準: {benchmark}) ...")
+    log.info(f"[{fund_code}] 生成累计超额收益曲线 (基准: {benchmark}) ...")
 
     bench = fetch_benchmark(benchmark, market=benchmark_market)
     if bench.empty:
-        log.warning(f"[{fund_code}] 基準數據獲取失敗，跳過超額收益圖")
+        log.warning(f"[{fund_code}] 基准数据获取失败，跳过超额收益图")
         return None
 
-    # 對齊日期
+    # 对齐日期
     df = df.copy()
     df["DailyRet"] = df["NAV"].pct_change()
     merged = df[["Date", "DailyRet"]].merge(bench, on="Date", how="inner").dropna()
     if len(merged) < 30:
-        log.warning(f"[{fund_code}] 基金與基準重疊日期不足 30 天，跳過超額收益圖")
+        log.warning(f"[{fund_code}] 基金与基准重叠日期不足 30 天，跳过超额收益图")
         return None
 
     merged = merged.reset_index(drop=True)
@@ -712,17 +727,17 @@ def plot_excess_return(df: pd.DataFrame, fund_code: str, save_dir: Path,
     merged["BenchCum"] = (1 + merged["BenchRet"]).cumprod()
     merged["Excess"]   = (merged["FundCum"] / merged["BenchCum"] - 1) * 100
 
-    # 統計
+    # 统计
     final_excess = merged["Excess"].iloc[-1]
     max_excess   = merged["Excess"].max()
     min_excess   = merged["Excess"].min()
-    log.info(f"[{fund_code}] 累計超額收益: 期末 {final_excess:+.2f}%  "
+    log.info(f"[{fund_code}] 累计超额收益: 期末 {final_excess:+.2f}%  "
              f"最高 {max_excess:+.2f}%  最低 {min_excess:+.2f}%")
 
-    # 畫圖
+    # 画图
     fig = go.Figure()
 
-    # 主線
+    # 主线
     fig.add_trace(go.Scatter(
         x=merged["Date"], y=merged["Excess"],
         mode="lines",
@@ -732,10 +747,10 @@ def plot_excess_return(df: pd.DataFrame, fund_code: str, save_dir: Path,
         hovertemplate="%{x|%Y-%m-%d}<br>Excess: %{y:+.2f}%<extra></extra>",
     ))
 
-    # 零線
+    # 零线
     fig.add_hline(y=0, line=dict(color="#666666", width=1, dash="dash"))
 
-    # 最高點 / 最低點標注
+    # 最高点 / 最低点标注
     if max_excess > 0:
         idx_max = merged["Excess"].idxmax()
         fig.add_annotation(
@@ -757,7 +772,7 @@ def plot_excess_return(df: pd.DataFrame, fund_code: str, save_dir: Path,
             bgcolor="rgba(255,255,255,0.85)",
         )
 
-    # 頂部信息卡
+    # 顶部信息卡
     stat_text = (
         f"Final: {final_excess:+.2f}%   |   "
         f"Peak: {max_excess:+.2f}%   |   "
@@ -803,7 +818,7 @@ def plot_excess_return(df: pd.DataFrame, fund_code: str, save_dir: Path,
 
     out = save_dir / f"{fund_code}_excess_return.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] 超額收益圖 → {out.name}")
+    log.info(f"[{fund_code}] 超额收益图 → {out.name}")
     return out
 
 
@@ -817,9 +832,9 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
     save_dir = base_output / fund_code
     save_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"===== 分析基金 {fund_code} =====")
-    log.info(f"輸出目錄: {save_dir.resolve()}")
+    log.info(f"输出目录: {save_dir.resolve()}")
 
-    # 清理上一次運行殘留的舊文件，避免失敗時誤讀舊結果
+    # 清理上一次运行残留的旧文件，避免失败时误读旧结果
     for old in save_dir.iterdir():
         if old.is_file():
             try:
@@ -835,38 +850,40 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
         "error":        None,
     }
 
-    # 1. 净值（硬依賴）
+    # 0. 自动获取 AUM（可选）
+    aum_val, aum_date = fetch_aum(fund_code)
+
+    # 1. 净值（硬依赖）
     start_date = cfg.get("start_date")
     if start_date:
         log.info(f"[{fund_code}] 起始追蹤日期: {start_date}")
     nav_df = fetch_nav(fund_code, save_dir, start_date=start_date)
     if nav_df.empty:
-        log.error(f"[{fund_code}] 無净值數據，終止")
+        log.error(f"[{fund_code}] 无净值数据，终止")
         summary["error"] = "净值数据为空（可能基金代码错误、数据源异常，或起始日期晚于最新净值）"
         return summary
-
     trend_html = plot_trend(nav_df, fund_code, save_dir)
 
-    # 2. 持倉（軟依賴）
+    # 2. 持仓（软依赖）
     holdings = fetch_holdings(fund_code, save_dir, use_cache=use_cache)
     holdings_html = plot_holdings(holdings, fund_code, save_dir) if not holdings.empty else None
 
-    # 3. 技術指標
+    # 3. 技术指标
     tech_df = compute_technical(nav_df, cfg, save_dir, fund_code)
     tech_html = plot_technical(tech_df, cfg, fund_code, save_dir)
 
-    # 4. 風險指標
+    # 4. 风险指标
     metrics = compute_risk_metrics(tech_df, cfg, fund_code,
                                    benchmark=cfg.get("benchmark"),
-                                   aum=cfg.get("aum"))
+                                   aum=aum_val)
     summary["metrics"] = metrics
     risk_html = plot_risk_metrics(
         tech_df, metrics, fund_code, save_dir,
-        aum=cfg.get("aum"),
-        aum_date=cfg.get("aum_date"),
+        aum=aum_val,
+        aum_date=aum_date,
     ) if metrics else None
 
-    # 5. 累計超額收益曲線（需要基準）
+    # 5. 累计超额收益曲线（需要基准）
     excess_html = None
     if cfg.get("benchmark"):
         excess_html = plot_excess_return(
@@ -875,7 +892,7 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
             benchmark_market=cfg.get("benchmark_market", "auto"),
         )
     
-    # 保存匯總
+    # 保存汇总
     summary["files"] = {
         "nav_csv":        f"{fund_code}_daily_nav.csv",
         "trend_html":     trend_html.name if trend_html else None,
@@ -889,7 +906,7 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
     summary_path = save_dir / f"{fund_code}_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    log.info(f"[{fund_code}] 匯總 → {summary_path.name}")
+    log.info(f"[{fund_code}] 汇总 → {summary_path.name}")
 
     if show:
         for h in [trend_html, holdings_html, tech_html, risk_html, excess_html]:
@@ -903,25 +920,23 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fund Analyzer — 輸入基金代碼，輸出净值、持倉、技術指標、風險指標")
-    parser.add_argument("fund_code", help="基金代碼（如 017436）")
-    parser.add_argument("--output", default="output", help="輸出根目錄（默認 ./output）")
+        description="Fund Analyzer — 输入基金代码，输出净值、持仓、技术指标、风险指标")
+    parser.add_argument("fund_code", help="基金代码（如 017436）")
+    parser.add_argument("--output", default="output", help="输出根目录（默认 ./output）")
     parser.add_argument("--benchmark", default=".NDX",
-                        help="基準指數代碼（默認 .NDX，傳空字符串跳過 IR）")
+                        help="基准指数代码（默认 .NDX，传空字符串跳过 IR）")
     parser.add_argument("--benchmark-market", default="auto",
                         choices=["auto", "us", "cn", "hk"],
-                        help="基準市場（auto=自動判斷，us=美股，cn=A股，hk=港股）")
+                        help="基准市场（auto=自动判断，us=美股，cn=A股，hk=港股）")
     parser.add_argument("--risk-free", type=float, default=0.02,
-                        help="年化無風險利率（默認 0.02）")
-    parser.add_argument("--aum", type=float, default=None,
-                        help="基金規模（億元），可選，手動傳入")
+                        help="年化无风险利率（默认 0.02）")
     parser.add_argument("--start-date", default=None,
-                        help="起始追蹤日期（YYYY-MM-DD），留空則從成立日開始")
+                        help="起始追蹤日期（YYYY-MM-DD），留空则从成立日开始")
     parser.add_argument("--no-cache", action="store_true",
-                        help="忽略持倉緩存，強製重新拉取")
+                        help="忽略持仓缓存，强制重新拉取")
     parser.add_argument("--show", action="store_true",
-                        help="生成完成後用瀏覽器打開所有圖表")
-    parser.add_argument("-v", "--verbose", action="store_true", help="詳細日誌")
+                        help="生成完成后用浏览器打开所有图表")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
