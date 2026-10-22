@@ -120,6 +120,11 @@ class FundAnalyzerGUI:
         self.run_btn = ttk.Button(btns, text="開始分析", command=self.start_analysis)
         self.run_btn.pack(side="left", padx=(0, 6))
 
+        # 新增：盘后监控按钮
+        self.post_market_btn = ttk.Button(btns, text="盘后监控(实时预估)", 
+                                          command=self.open_post_market_window, state="disabled")
+        self.post_market_btn.pack(side="left", padx=(0, 6))
+
         self.open_all_btn = ttk.Button(btns, text="📊 打开综合报告(视窗)",
                                         command=self.open_master_report, state="disabled")
         self.open_all_btn.pack(side="left", padx=(0, 6))
@@ -348,13 +353,15 @@ class FundAnalyzerGUI:
         # 补上缺失的 n_html 变量定义
         n_html = sum(1 for p in self.result_files.values() if p.suffix == ".html")
         self.open_all_btn.configure(state="normal")
+        self.post_market_btn.configure(state="normal") # 启用盘后监控按钮
 
         self.status_var.set(
             f"分析完成 — {len(self.result_files)} 個文件（{n_html} 個 HTML 報告）"
         )
 
-        # 直接自动打开 Webview 视窗
-        self.open_master_report()
+        # 分析完成后，启用盘后监控和综合报告按钮
+        self.post_market_btn.configure(state="normal")
+        self.open_all_btn.configure(state="normal")
 
     # --------------------------------------------------------
     # 事件處理
@@ -383,6 +390,18 @@ class FundAnalyzerGUI:
         if opened:
             self.status_var.set(f"已打開 {opened} 個 HTML 報告")
 
+    def open_post_market_window(self):
+        if not self._output_dir or not self._output_dir.exists():
+            messagebox.showwarning("提示", "请先运行一次分析生成持仓数据。")
+            return
+            
+        fund_code = self.code_var.get().strip()
+        if not fund_code:
+            return
+            
+        # 弹出独立窗口
+        PostMarketWindow(self.root, fund_code, self._output_dir)
+
     def open_master_report(self):
         if not hasattr(self, "_master_report_path") or not self._master_report_path.exists():
             messagebox.showwarning("提示", "综合报告尚未生成。")
@@ -406,6 +425,146 @@ class FundAnalyzerGUI:
         if self._output_dir and self._output_dir.exists():
             webbrowser.open(self._output_dir.as_uri())
 
+# ============================================================
+# 盘后监控独立窗口
+# ============================================================
+class PostMarketWindow(tk.Toplevel):
+    def __init__(self, master, fund_code, save_dir):
+        super().__init__(master)
+        self.title(f"盘后/盘前监控 - {fund_code}")
+        self.geometry("800x600")
+        self.fund_code = fund_code
+        self.save_dir = save_dir
+        
+        self.is_running = True
+        
+        self._build_ui()
+        self.refresh_data()
+        
+        # 窗口关闭时停止循环
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _build_ui(self):
+        # 顶部信息区
+        top_frame = ttk.Frame(self, padding=10)
+        top_frame.pack(fill="x")
+        
+        self.lbl_estimate = ttk.Label(top_frame, text="计算中...", font=("Arial", 24, "bold"))
+        self.lbl_estimate.pack(pady=5)
+        
+        self.lbl_detail = ttk.Label(top_frame, text="", font=("Arial", 11))
+        self.lbl_detail.pack(pady=2)
+        
+        self.lbl_time = ttk.Label(top_frame, text="", foreground="#888888", font=("Arial", 9))
+        self.lbl_time.pack(pady=2)
+
+        # 表格区
+        columns = ("ticker", "name", "weight", "regular", "post", "change")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=12)
+        self.tree.heading("ticker", text="代码")
+        self.tree.heading("name", text="名称")
+        self.tree.heading("weight", text="权重(%)")
+        self.tree.heading("regular", text="昨收/现价")
+        self.tree.heading("post", text="盘后/盘前价")
+        self.tree.heading("change", text="涨跌幅(%)")
+        
+        self.tree.column("ticker", width=80, anchor="center")
+        self.tree.column("name", width=150, anchor="w")
+        self.tree.column("weight", width=80, anchor="e")
+        self.tree.column("regular", width=100, anchor="e")
+        self.tree.column("post", width=100, anchor="e")
+        self.tree.column("change", width=100, anchor="e")
+        
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 颜色标签
+        self.tree.tag_configure('positive', foreground='#e53935') # 红色
+        self.tree.tag_configure('negative', foreground='#43a047') # 绿色
+        self.tree.tag_configure('missing', foreground='#999999')  # 灰色
+
+    def refresh_data(self):
+        if not self.is_running:
+            return
+            
+        # 用线程去拉数据，防止卡 UI
+        def task():
+            from fund_analyzer import fetch_post_market_estimate
+            try:
+                data = fetch_post_market_estimate(self.fund_code, self.save_dir)
+                self.after(0, self._update_ui, data)
+            except Exception as e:
+                print(e)
+
+        threading.Thread(target=task, daemon=True).start()
+        
+        # 每 60 秒刷新一次
+        self.after(60000, self.refresh_data)
+
+    def _update_ui(self, data):
+        if not self.is_running:
+            return
+            
+        # 更新顶部大字
+        if data.get("estimate_return") is not None:
+            est = data["estimate_return"]
+            # 如果是 0.00%，可能是休市状态
+            if abs(est) < 0.01:
+                self.lbl_estimate.configure(text=f"平盘 (或处于休市阶段)", foreground="#333333")
+            else:
+                color = "#e53935" if est > 0 else "#43a047" if est < 0 else "#333333"
+                self.lbl_estimate.configure(text=f"当前盘前/盘后预估: {est:+.2f}%", foreground=color)
+        else:
+            self.lbl_estimate.configure(text="无法预估", foreground="#888888")
+            
+        # 昨日实际与期货参考
+        yest = data.get("yesterday_official_return")
+        nq = data.get("nq_futures_return")
+        yest_str = f"{yest:+.2f}%" if yest is not None else "N/A"
+        nq_str = f"{nq:+.2f}%" if nq is not None else "N/A"
+        
+        detail = f"昨日实际净值: {yest_str}  |  纳指期货: {nq_str}"
+        
+        # 状态信息拼接
+        import datetime
+        now = datetime.datetime.now()
+        # 粗略判断美股盘前/盘后时间（北京时间）：
+        # 冬令时：盘前 17:00-22:30，盘后 05:00-09:00
+        # 夏令时：盘前 16:00-21:30，盘后 04:00-08:00
+        # 简单起见，这里给个通用提示
+        if 9 <= now.hour < 16:
+            detail += "  |  ℹ️ 当前美股处于休市，数据基于昨日盘后/昨收，将于北京时间16:00盘前更新"
+        elif data.get("message"):
+            detail += f"  |  {data['message']}"
+            
+        self.lbl_detail.configure(text=detail)
+        
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        self.lbl_time.configure(text=f"最后更新: {now_str} (每60秒自动刷新)")
+
+        # 更新表格
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        for h in data.get("holdings", []):
+            change_val = h["change_pct"]
+            if change_val is not None:
+                change_str = f"{change_val:+.2f}%"
+                tag = 'positive' if change_val > 0 else 'negative' if change_val < 0 else ''
+            else:
+                change_str = "--"
+                tag = 'missing'
+                
+            reg_str = f"{h['regular_price']:.2f}" if h["regular_price"] else "--"
+            post_str = f"{h['post_price']:.2f}" if h["post_price"] else "--"
+            
+            self.tree.insert("", "end", values=(
+                h["ticker"], h["name"], f"{h['weight']:.2f}", 
+                reg_str, post_str, change_str
+            ), tags=(tag,))
+
+    def on_close(self):
+        self.is_running = False
+        self.destroy()
 
 # ============================================================
 # 入口

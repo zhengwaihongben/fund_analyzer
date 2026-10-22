@@ -254,7 +254,7 @@ def plot_trend(df: pd.DataFrame, fund_code: str, save_dir: Path) -> Path:
 # ============================================================
 # 2. 持仓
 # ============================================================
-def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFrame:
+def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True, start_date=None) -> pd.DataFrame:
     cache_path = save_dir / f"{fund_code}_holdings_raw.csv"
     if use_cache and cache_path.exists():
         log.info(f"[{fund_code}] 从缓存读取持仓: {cache_path.name}")
@@ -262,7 +262,20 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFra
 
     log.info(f"[{fund_code}] 获取历史持仓 ...")
     current_year = datetime.now().year
-    years = [str(y) for y in range(current_year - 3, current_year + 1)]
+    
+    # 根据 start_date 决定要抓取哪几年
+    if start_date:
+        try:
+            start_year = pd.to_datetime(start_date).year
+            start_year = max(start_year, current_year - 3)  # 最多往前推3年防接口抽风
+            years = [str(y) for y in range(start_year, current_year + 1)]
+        except Exception as e:
+            log.warning(f"[{fund_code}] 起始日期解析失败: {e}，默认拉取近4年持仓")
+            years = [str(y) for y in range(current_year - 3, current_year + 1)]
+    else:
+        years = [str(y) for y in range(current_year - 3, current_year + 1)]
+
+    log.info(f"[{fund_code}] 需抓取年份: {years}")
 
     all_holdings = []
     for year in years:
@@ -273,7 +286,6 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True) -> pd.DataFra
                 log.info(f"[{fund_code}] {year} 年持仓: {len(df)} 条")
         except Exception as e:
             log.warning(f"[{fund_code}] {year} 年持仓获取失败: {e}")
-        
 
     if not all_holdings:
         log.warning(f"[{fund_code}] 无持仓数据")
@@ -311,7 +323,7 @@ def _clean_holdings(holdings: pd.DataFrame) -> pd.DataFrame:
     return holdings
 
 
-def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
+def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path, start_date: str = None):
     if holdings.empty:
         return None
     log.info(f"[{fund_code}] 生成持仓堆叠面积图 ...")
@@ -320,6 +332,20 @@ def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
     if "Weight" not in holdings.columns or "QuarterLabel" not in holdings.columns:
         log.warning(f"[{fund_code}] 持仓数据字段不足，跳过绘图")
         return None
+
+    # 新增：按 start_date 过滤季度数据
+    if start_date:
+        try:
+            start_year = pd.to_datetime(start_date).year
+            # 提取 QuarterLabel 的年份部分并过滤
+            holdings = holdings[
+                holdings["QuarterLabel"].astype(str).str[:4].astype(int) >= start_year
+            ]
+            if holdings.empty:
+                log.warning(f"[{fund_code}] 按起始年份 {start_year} 过滤后无持仓数据，跳过绘图")
+                return None
+        except Exception as e:
+            log.warning(f"[{fund_code}] 过滤持仓年份失败: {e}")
 
     clean_path = save_dir / f"{fund_code}_holdings_clean.csv"
     holdings.to_csv(clean_path, index=False, encoding="utf-8-sig")
@@ -886,8 +912,8 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
     trend_html = plot_trend(nav_df, fund_code, save_dir)
 
     # 2. 持仓（软依赖）
-    holdings = fetch_holdings(fund_code, save_dir, use_cache=use_cache)
-    holdings_html = plot_holdings(holdings, fund_code, save_dir) if not holdings.empty else None
+    holdings = fetch_holdings(fund_code, save_dir, use_cache=use_cache, start_date=start_date)
+    holdings_html = plot_holdings(holdings, fund_code, save_dir, start_date=start_date) if not holdings.empty else None
 
     # 3. 技术指标
     tech_df = compute_technical(nav_df, cfg, save_dir, fund_code)
@@ -1032,9 +1058,178 @@ def generate_master_report(fund_code: str, save_dir: Path) -> Path:
         
         return out_path
 
+# ============================================================
+# 5. 盘后/盘前交易监控（解决 QDII 时差盲盒）
+# ============================================================
+import yfinance as yf
 
+def fetch_post_market_estimate(fund_code: str, save_dir: Path) -> dict:
+    """
+    读取最新持仓，获取盘后/盘前数据，计算预估涨跌幅（批量请求优化版）。
+    """
+    result = {
+        "status": "success",
+        "fund_code": fund_code,
+        "yesterday_official_return": None, 
+        "estimate_return": None,           
+        "nq_futures_return": None,         
+        "holdings": [],                    
+        "message": ""
+    }
 
+    # 1. 获取昨日官方净值涨跌幅
+    nav_csv = save_dir / f"{fund_code}_daily_nav.csv"
+    if nav_csv.exists():
+        try:
+            df_nav = pd.read_csv(nav_csv)
+            if len(df_nav) >= 2:
+                last_nav = df_nav["NAV"].iloc[-1]
+                prev_nav = df_nav["NAV"].iloc[-2]
+                result["yesterday_official_return"] = (last_nav / prev_nav - 1) * 100
+        except Exception:
+            pass
 
+    # 2. 获取纳指期货数据
+    try:
+        nq = yf.Ticker("NQ=F")
+        nq_hist = nq.history(period="5d").dropna()
+        if len(nq_hist) >= 2:
+            nq_last = nq_hist['Close'].iloc[-1]
+            nq_prev = nq_hist['Close'].iloc[-2]
+            result["nq_futures_return"] = (nq_last / nq_prev - 1) * 100
+    except Exception:
+        pass
+
+    # 3. 获取最新持仓
+    clean_csv = save_dir / f"{fund_code}_holdings_clean.csv"
+    if not clean_csv.exists():
+        result["status"] = "error"
+        result["message"] = "找不到持仓数据，请先在主界面运行一次分析。"
+        return result
+
+    try:
+        df_holdings = pd.read_csv(clean_csv)
+        latest_q = df_holdings["QuarterLabel"].iloc[0]
+        latest = df_holdings[df_holdings["QuarterLabel"] == latest_q].head(10)
+    except Exception as e:
+        result["status"] = "error"
+        result["message"] = f"读取持仓失败: {e}"
+        return result
+
+    # 收集所有需要查询的 Ticker（过滤掉非美股代码）
+    ticker_map = {}  # 映射关系：原始代码 -> 清洗后的yf代码
+    for _, row in latest.iterrows():
+        raw_ticker = str(row["StockCode"]).strip()
+        # 常见的美股中概股/港股会带数字或点号，yfinance 需要转换
+        # 这里简单判断：纯字母才去请求
+        if raw_ticker.isalpha():
+            ticker_map[raw_ticker] = raw_ticker
+            
+    tickers_list = list(ticker_map.values())
+    if not tickers_list:
+         result["status"] = "error"
+         result["message"] = "持仓中无美股代码。"
+         return result
+
+    # 4. 批量获取日线数据（获取昨收价）
+    daily_close = {}
+    try:
+        # 批量下载最近5天数据，确保有至少2天的有效数据
+        df_daily_all = yf.download(tickers_list, period="5d", progress=False, group_by="ticker")
+        for t in tickers_list:
+            if isinstance(df_daily_all.columns, pd.MultiIndex):
+                # 处理多级列索引
+                if 'Close' in df_daily_all[t].columns:
+                    df_clean = df_daily_all[t]['Close'].dropna()
+                    if not df_clean.empty:
+                        daily_close[t] = df_clean.iloc[-1]
+            else:
+                if 'Close' in df_daily_all.columns:
+                    df_clean = df_daily_all['Close'].dropna()
+                    if not df_clean.empty:
+                        daily_close[t] = df_clean.iloc[-1]
+    except Exception as e:
+        print(f"批量获取日线失败: {e}")
+
+    # 5. 批量获取分钟线数据（包含盘前/盘后）
+    latest_price = {}
+    try:
+        # 批量请求，1分钟间隔，包含盘前盘后，获取最近5天
+        df_intra_all = yf.download(tickers_list, period="5d", interval="1m", prepost=True, progress=False, group_by="ticker")
+        for t in tickers_list:
+            if isinstance(df_intra_all.columns, pd.MultiIndex):
+                if 'Close' in df_intra_all[t].columns:
+                    df_clean = df_intra_all[t]['Close'].dropna()
+                    if not df_clean.empty:
+                        latest_price[t] = df_clean.iloc[-1]
+            else:
+                if 'Close' in df_intra_all.columns:
+                    df_clean = df_intra_all['Close'].dropna()
+                    if not df_clean.empty:
+                        latest_price[t] = df_clean.iloc[-1]
+    except Exception as e:
+        print(f"批量获取分钟线失败: {e}")
+
+    # 6. 组装结果并计算
+    total_weight_valid = 0
+    weighted_return = 0
+    missing_data = False
+
+    for _, row in latest.iterrows():
+        raw_ticker = str(row["StockCode"]).strip()
+        name = row["Stock"]
+        weight = float(row["Weight"]) / 100.0 
+        
+        stock_info = {
+            "ticker": raw_ticker,
+            "name": name,
+            "weight": weight * 100,
+            "regular_price": None,
+            "post_price": None,
+            "change_pct": None,
+            "status": ""
+        }
+
+        if raw_ticker not in ticker_map:
+            stock_info["status"] = "非美股代码"
+            result["holdings"].append(stock_info)
+            missing_data = True
+            continue
+
+        t = ticker_map[raw_ticker]
+        reg_p = daily_close.get(t)
+        latest_p = latest_price.get(t)
+
+        if reg_p is not None:
+            stock_info["regular_price"] = reg_p
+        if latest_p is not None:
+            stock_info["post_price"] = latest_p
+
+        if reg_p and latest_p and reg_p > 0:
+            change = (latest_p / reg_p - 1) * 100
+            # 如果变化极小，可能是非交易时段盘前价格未动，归零处理
+            if abs(change) < 0.001:
+                change = 0.0
+                
+            stock_info["change_pct"] = change
+            weighted_return += change * weight
+            total_weight_valid += weight
+        else:
+            stock_info["status"] = "数据缺失"
+            missing_data = True
+
+        result["holdings"].append(stock_info)
+
+    # 7. 计算综合预估
+    if total_weight_valid > 0:
+        raw_estimate = weighted_return / total_weight_valid
+        result["estimate_return"] = raw_estimate
+        if missing_data:
+            result["message"] = "⚠️ 部分股票缺失盘后数据，预估仅基于有数据的股票推算"
+    else:
+        result["message"] = "❌ 所有股票均无法获取盘后数据，无法预估"
+
+    return result
 
 if __name__ == "__main__":
     main()
