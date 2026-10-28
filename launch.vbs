@@ -1,20 +1,17 @@
-'' Fund Analyzer Launcher
+' Fund Analyzer Launcher
 Option Explicit
 
-Dim shell, fso, scriptDir, pythonExe, scriptPath, cmd
+Dim shell, fso, scriptDir, pythonExe, scriptPath, cmd, logPath
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-'' 腳本所在目錄
-scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+scriptDir  = fso.GetParentFolderName(WScript.ScriptFullName)
 scriptPath = scriptDir & "\fund_analyzer_gui.py"
 
-'' pythonw.exe 路徑（按你的實際環境修改）
-pythonExe = "C:\Users\user\anaconda3\envs\quant-finance\pythonw.exe"
+pythonExe = "C:\Users\user\anaconda3\envs\quant-finance\python.exe"
 
-'' 檢查文件存在
 If Not fso.FileExists(pythonExe) Then
-    MsgBox "找不到 pythonw.exe：" & vbCrLf & pythonExe & vbCrLf & vbCrLf & _
+    MsgBox "找不到 python.exe：" & vbCrLf & pythonExe & vbCrLf & vbCrLf & _
            "請修改 launch.vbs 中的 pythonExe 變量。", 16, "Fund Analyzer"
     WScript.Quit 1
 End If
@@ -24,7 +21,12 @@ If Not fso.FileExists(scriptPath) Then
     WScript.Quit 1
 End If
 
-'' 設置工作目錄並啟動
 shell.CurrentDirectory = scriptDir
-cmd = """" & pythonExe & """ """ & scriptPath & """"
-shell.Run cmd, 0, False   '' 0 = 隱藏窗口, False = 不等待
+
+' 把 stdout/stderr 重定向到 launch_stdout.log
+logPath = scriptDir & "\launch_stdout.log"
+cmd = "cmd /c """"" & pythonExe & """ """ & scriptPath & """ > """ & logPath & """ 2>&1"""
+
+' 第二個參數 0 = 完全隱藏窗口（無黑窗）
+' 第三個參數 False = 不等待退出（VBS 立刻返回）
+shell.Run cmd, 0, False

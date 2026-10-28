@@ -23,7 +23,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import time
-
+import statsmodels.api as sm
+import tkinter as tk
 
 # ============================================================
 # 配置
@@ -428,6 +429,34 @@ def compute_technical(df: pd.DataFrame, cfg: dict,
     df["MACD_DEA"] = df["MACD_DIF"].ewm(span=9, adjust=False).mean()
     df["MACD_Hist"] = (df["MACD_DIF"] - df["MACD_DEA"]) * 2  # A股习惯乘2，更直观
 
+    # ================= 新增：計算 KDJ (9, 3, 3) =================
+    low_min = df["NAV"].rolling(window=9, min_periods=1).min()
+    high_max = df["NAV"].rolling(window=9, min_periods=1).max()
+    rsv = (df["NAV"] - low_min) / (high_max - low_min + 1e-12) * 100
+    df["KDJ_K"] = rsv.ewm(com=2, adjust=False).mean()
+    df["KDJ_D"] = df["KDJ_K"].ewm(com=2, adjust=False).mean()
+    df["KDJ_J"] = 3 * df["KDJ_K"] - 2 * df["KDJ_D"]
+
+    # ================= 新增：計算 ATR (14) 與 ADX (14) =================
+    # 因為基金沒有高低價，真實波幅 TR 退化為淨值變動的絕對值
+    tr = df["NAV"].diff().abs()
+    df["ATR"] = tr.ewm(alpha=1/14, adjust=False).mean()
+
+    # 計算 ADX 的 +DI, -DI 和 ADX
+    up_move = df["NAV"].diff()
+    down_move = -df["NAV"].diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / (atr_14 + 1e-12))
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / (atr_14 + 1e-12))
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-12)
+    df["ADX_PlusDI"] = plus_di
+    df["ADX_MinusDI"] = minus_di
+    df["ADX"] = dx.ewm(alpha=1/14, adjust=False).mean()
+
     out = save_dir / f"{fund_code}_daily_nav_sma_boll.csv"
     df.to_csv(out, index=False, encoding="utf-8-sig")
 
@@ -437,148 +466,166 @@ def compute_technical(df: pd.DataFrame, cfg: dict,
 
 def plot_technical(df: pd.DataFrame, cfg: dict,
                    fund_code: str, save_dir: Path) -> Path:
-    log.info(f"[{fund_code}] 生成 SMA/BOLL/RSI/MACD 交互图 ...")
+    log.info(f"[{fund_code}] 生成 SMA/BOLL/RSI/MACD/KDJ/ATR/ADX 交互图 ...")
     windows = cfg["sma_windows"]
     
-    # 创建上中下三个子图，共享 X 轴
+    if "IsEstimated" not in df.columns:
+        df["IsEstimated"] = False
+
+    real_df = df[df["IsEstimated"] == False]
+    est_df = df[df["IsEstimated"] == True]
+
+    if not est_df.empty and not real_df.empty:
+        last_real = real_df.iloc[[-1]]
+        est_line_df = pd.concat([last_real, est_df]).copy()
+        est_line_df["IsEstimated"] = True
+    else:
+        est_line_df = pd.DataFrame()
+
+    # 建立 5 個子圖
     fig = make_subplots(
-        rows=3, cols=1, 
+        rows=5, cols=1, 
         shared_xaxes=True, 
         vertical_spacing=0.03,
-        row_heights=[0.6, 0.2, 0.2],  # 主图占 60%，MACD 20%，RSI 20%
-        subplot_titles=(f"{fund_code} · NAV / SMA / BOLL", "MACD (12, 26, 9)", "RSI (14)")
+        row_heights=[0.4, 0.15, 0.15, 0.15, 0.15], # 主圖 40%，其他各 15%
+        subplot_titles=(
+            f"{fund_code} · NAV / SMA / BOLL", 
+            "MACD (12, 26, 9)", 
+            "RSI (14) & KDJ (9,3,3)", 
+            "ADX (14)", 
+            "ATR (14) - 波動率"
+        )
     )
 
-    # ================= 行 1: 主图 =================
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["NAV"], mode="lines", name="NAV",
+    # ================= 行 1: 主圖 =================
+    fig.add_trace(go.Scatter(x=real_df["Date"], y=real_df["NAV"], mode="lines", name="NAV",
         line=dict(color=COLOR_MAP["NAV"], width=1.2),
-        hovertemplate="%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>",
-        visible=True,
-    ), row=1, col=1)
+        hovertemplate="%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>"), row=1, col=1)
 
+    if not est_line_df.empty:
+        fig.add_trace(go.Scatter(x=est_line_df["Date"], y=est_line_df["NAV"], mode="lines+markers", name="Estimated NAV",
+            line=dict(color="#d62728", width=2, dash="dash"),
+            marker=dict(size=8, color="#d62728", symbol="circle-open", line=dict(width=2)),
+            hovertemplate="<b>Estimated</b><br>%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>"), row=1, col=1)
+
+    idx_sma = []
     for w in windows:
+        idx_sma.append(len(fig.data))
         key = f"SMA{w}"
-        fig.add_trace(go.Scatter(
-            x=df["Date"], y=df[key], mode="lines", name=f"SMA {w}",
+        fig.add_trace(go.Scatter(x=df["Date"], y=df[key], mode="lines", name=f"SMA {w}",
             line=dict(color=COLOR_MAP[key], width=1.6),
-            hovertemplate=f"%{{x|%Y-%m-%d}}<br>SMA {w}: %{{y:.4f}}<extra></extra>",
-            visible=True,
-        ), row=1, col=1)
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>SMA {w}: %{{y:.4f}}<extra></extra>"), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Upper"], mode="lines", name="BOLL Upper",
-        line=dict(color="rgba(214,39,40,0.9)", width=1.4),
-        hovertemplate="%{x|%Y-%m-%d}<br>Upper: %{y:.4f}<extra></extra>",
-        visible=False,
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Lower"], mode="lines", name="BOLL Lower",
-        line=dict(color="rgba(214,39,40,0.9)", width=1.4),
-        fill="tonexty", fillcolor="rgba(214,39,40,0.10)",
-        hovertemplate="%{x|%Y-%m-%d}<br>Lower: %{y:.4f}<extra></extra>",
-        visible=False,
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["BOLL_Mid"], mode="lines", name="BOLL Mid",
-        line=dict(color="#1f77b4", width=1.8, dash="dash"),
-        hovertemplate="%{x|%Y-%m-%d}<br>Mid: %{y:.4f}<extra></extra>",
-        visible=False,
-    ), row=1, col=1)
+    idx_boll_upper = len(fig.data)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["BOLL_Upper"], mode="lines", name="BOLL Upper", line=dict(color="rgba(214,39,40,0.9)", width=1.4), visible=False), row=1, col=1)
+    idx_boll_lower = len(fig.data)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["BOLL_Lower"], mode="lines", name="BOLL Lower", line=dict(color="rgba(214,39,40,0.9)", width=1.4), fill="tonexty", fillcolor="rgba(214,39,40,0.10)", visible=False), row=1, col=1)
+    idx_boll_mid = len(fig.data)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["BOLL_Mid"], mode="lines", name="BOLL Mid", line=dict(color="#1f77b4", width=1.8, dash="dash"), visible=False), row=1, col=1)
 
     # ================= 行 2: MACD =================
-    # MACD 柱状图（红涨绿跌）
     colors = ['#ef5350' if val > 0 else '#26a69a' for val in df["MACD_Hist"]]
-    fig.add_trace(go.Bar(
-        x=df["Date"], y=df["MACD_Hist"], name="MACD Hist",
-        marker_color=colors, opacity=0.7,
-        hovertemplate="%{x|%Y-%m-%d}<br>Hist: %{y:.4f}<extra></extra>",
-    ), row=2, col=1)
+    fig.add_trace(go.Bar(x=df["Date"], y=df["MACD_Hist"], name="MACD Hist", marker_color=colors, opacity=0.7), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["MACD_DIF"], mode="lines", name="DIF", line=dict(color="#1f77b4", width=1.2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["MACD_DEA"], mode="lines", name="DEA", line=dict(color="#ff9800", width=1.2)), row=2, col=1)
 
-    # DIF 线（快线）
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["MACD_DIF"], mode="lines", name="DIF",
-        line=dict(color="#1f77b4", width=1.2),
-        hovertemplate="%{x|%Y-%m-%d}<br>DIF: %{y:.4f}<extra></extra>",
-    ), row=2, col=1)
+    # ================= 行 3: RSI & KDJ =================
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["RSI"], mode="lines", name="RSI", line=dict(color="#8e44ad", width=1.4)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["KDJ_K"], mode="lines", name="KDJ K", line=dict(color="#ff9800", width=1.2)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["KDJ_D"], mode="lines", name="KDJ D", line=dict(color="#1f77b4", width=1.2)), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.3, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.3, row=3, col=1)
 
-    # DEA 线（慢线）
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["MACD_DEA"], mode="lines", name="DEA",
-        line=dict(color="#ff9800", width=1.2),
-        hovertemplate="%{x|%Y-%m-%d}<br>DEA: %{y:.4f}<extra></extra>",
-    ), row=2, col=1)
+    # ================= 行 4: ADX =================
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["ADX"], mode="lines", name="ADX", line=dict(color="#000000", width=1.5)), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["ADX_PlusDI"], mode="lines", name="+DI", line=dict(color="#26a69a", width=1, dash="dot")), row=4, col=1)
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["ADX_MinusDI"], mode="lines", name="-DI", line=dict(color="#ef5350", width=1, dash="dot")), row=4, col=1)
+    fig.add_hline(y=25, line_dash="dash", line_color="gray", opacity=0.5, row=4, col=1)
 
-    # ================= 行 3: RSI =================
-    fig.add_trace(go.Scatter(
-        x=df["Date"], y=df["RSI"], mode="lines", name="RSI (14)",
-        line=dict(color="#8e44ad", width=1.4),
-        hovertemplate="%{x|%Y-%m-%d}<br>RSI: %{y:.2f}<extra></extra>",
-    ), row=3, col=1)
-    
-    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=3, col=1)
+    # ================= 行 5: ATR =================
+    fig.add_trace(go.Scatter(x=df["Date"], y=df["ATR"], mode="lines", name="ATR", line=dict(color="#17becf", width=1.5), fill="tozeroy", fillcolor="rgba(23,190,207,0.1)"), row=5, col=1)
 
-    # ================= 按钮显隐逻辑 =================
-    # 索引顺序：0:NAV, 1~5:SMA, 6~8:BOLL, 9:MACD Hist, 10:DIF, 11:DEA, 12:RSI (共 13 个)
-    # 注意：副图（MACD和RSI）的 trace 永远设为 True，不受按钮影响
-    sma_visible  = [True] * 6 + [False] * 3 + [True] * 4
-    boll_visible = [True] + [False] * 5 + [True] * 3 + [True] * 4
+    # ================= 突出顯示預估日的各項指標 =================
+    if not est_df.empty:
+        est_date = est_df["Date"].iloc[0]
+        # 主圖 SMA
+        for w in windows:
+            if pd.notna(est_df[f"SMA{w}"].iloc[0]):
+                fig.add_trace(go.Scatter(x=[est_date], y=[est_df[f"SMA{w}"].iloc[0]], mode="markers", marker=dict(color=COLOR_MAP[f"SMA{w}"], size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=1, col=1)
+        
+        # MACD
+        if pd.notna(est_df["MACD_DIF"].iloc[0]):
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["MACD_DIF"].iloc[0]], mode="markers", marker=dict(color="#1f77b4", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["MACD_DEA"].iloc[0]], mode="markers", marker=dict(color="#ff9800", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=2, col=1)
+        
+        # RSI & KDJ
+        if pd.notna(est_df["RSI"].iloc[0]):
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["RSI"].iloc[0]], mode="markers", marker=dict(color="#8e44ad", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=3, col=1)
+        if pd.notna(est_df["KDJ_K"].iloc[0]):
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["KDJ_K"].iloc[0]], mode="markers", marker=dict(color="#ff9800", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["KDJ_D"].iloc[0]], mode="markers", marker=dict(color="#1f77b4", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=3, col=1)
+            
+        # ADX
+        if pd.notna(est_df["ADX"].iloc[0]):
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["ADX"].iloc[0]], mode="markers", marker=dict(color="#000000", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=4, col=1)
+            
+        # ATR
+        if pd.notna(est_df["ATR"].iloc[0]):
+            fig.add_trace(go.Scatter(x=[est_date], y=[est_df["ATR"].iloc[0]], mode="markers", marker=dict(color="#17becf", size=8, symbol="star"), showlegend=False, hoverinfo="skip"), row=5, col=1)
+
+    # ================= 按鈕顯隱邏輯 =================
+    total_traces = len(fig.data)
+    visible_sma = [True] * total_traces
+    visible_sma[idx_boll_upper] = False
+    visible_sma[idx_boll_lower] = False
+    visible_sma[idx_boll_mid] = False
+
+    visible_boll = [True] * total_traces
+    for idx in idx_sma:
+        visible_boll[idx] = False
 
     fig.update_layout(
         updatemenus=[dict(
-            type="buttons", direction="right",
-            x=0.0, y=1.05, xanchor="left", yanchor="top",
-            showactive=True, active=0,
-            bgcolor="#f0f0f0", bordercolor="#cccccc", font=dict(size=13),
+            type="buttons", direction="right", x=0.0, y=1.05, xanchor="left", yanchor="top",
+            showactive=True, active=0, bgcolor="#f0f0f0", bordercolor="#cccccc", font=dict(size=13),
             buttons=[
-                dict(
-                    label="SMA",
-                    method="update",
-                    args=[{"visible": sma_visible}, {"title.text": f"{fund_code} · SMA / MACD / RSI"}],
-                ),
-                dict(
-                    label="BOLL",
-                    method="update",
-                    args=[{"visible": boll_visible}, {"title.text": f"{fund_code} · BOLL / MACD / RSI"}],
-                ),
+                dict(label="SMA", method="update", args=[{"visible": visible_sma}]),
+                dict(label="BOLL", method="update", args=[{"visible": visible_boll}]),
             ],
         )],
-        title=dict(text=f"{fund_code} · SMA / MACD / RSI", font=dict(size=17)),
-        xaxis=dict(rangeslider=dict(visible=False), type="date"),
-        xaxis2=dict(rangeslider=dict(visible=False), type="date"),
-        xaxis3=dict(
-            rangeslider=dict(visible=True),  # 最下方保留滑块
-            type="date",
-            tickformatstops=[
-                dict(dtickrange=[None, 604800000], value="%Y-%m-%d"),
-                dict(dtickrange=[604800000, "M1"], value="%Y-%m-%d"),
-                dict(dtickrange=["M1", "M12"],     value="%Y-%m"),
-                dict(dtickrange=["M12", None],     value="%Y"),
-            ],
-            hoverformat="%Y-%m-%d",
-        ),
-        yaxis=dict(title="Unit NAV", autorange=True, fixedrange=False),
-        yaxis2=dict(title="MACD", zeroline=True, zerolinecolor="#888"),
-        yaxis3=dict(title="RSI", range=[0, 100], tickvals=[0, 30, 50, 70, 100]),
+        title=dict(text=f"{fund_code} · 綜合技術指標", font=dict(size=17)),
+        height=1300, # 因為子圖變多，高度增加到 1300
         hovermode="x unified",
         template="plotly_white",
-        height=900,  # 整体拉高以容纳 3 个图
         margin=dict(l=60, r=40, t=100, b=60),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom", y=1.02,
-            xanchor="right", x=1,
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="#cccccc", borderwidth=1,
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, bgcolor="rgba(255,255,255,0.8)", bordercolor="#cccccc", borderwidth=1),
     )
     
+    # 配置 X 軸（只有最下面的 5 號圖顯示滑塊和日期）
+    for i in range(1, 5):
+        fig.update_xaxes(rangeslider=dict(visible=False), type="date", row=i, col=1)
+    
+    fig.update_xaxes(
+        rangeslider=dict(visible=True), type="date", row=5, col=1,
+        tickformatstops=[
+            dict(dtickrange=[None, 604800000], value="%Y-%m-%d"),
+            dict(dtickrange=[604800000, "M1"], value="%Y-%m-%d"),
+            dict(dtickrange=["M1", "M12"],     value="%Y-%m"),
+            dict(dtickrange=["M12", None],     value="%Y"),
+        ],
+        hoverformat="%Y-%m-%d"
+    )
+    
+    # 配置 Y 軸標題
+    fig.update_yaxes(title_text="Unit NAV", row=1, col=1)
+    fig.update_yaxes(title_text="MACD", row=2, col=1)
+    fig.update_yaxes(title_text="震盪指標", range=[-20, 120], row=3, col=1) # KDJ 的 J 線可能超過 100 或低於 0，所以放寬
+    fig.update_yaxes(title_text="趨勢強度", range=[0, 100], row=4, col=1)
+    fig.update_yaxes(title_text="波幅", row=5, col=1)
+
     out = save_dir / f"{fund_code}_nav_sma_boll.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] SMA/BOLL/MACD/RSI 图 → {out.name}")
+    log.info(f"[{fund_code}] 綜合技術指標圖 → {out.name}")
     return out
 
 # ============================================================
@@ -911,15 +958,22 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
         return summary
     trend_html = plot_trend(nav_df, fund_code, save_dir)
 
-    # 2. 持仓（软依赖）
+    # 2. 持仓
     holdings = fetch_holdings(fund_code, save_dir, use_cache=use_cache, start_date=start_date)
     holdings_html = plot_holdings(holdings, fund_code, save_dir, start_date=start_date) if not holdings.empty else None
 
-    # 3. 技术指标
-    tech_df = compute_technical(nav_df, cfg, save_dir, fund_code)
+    # 3. 估算最新净值
+    estimated_df = estimate_latest_nav(fund_code, save_dir)
+    
+    # 4. 技术指标（将估算点传给 compute_technical，让所有指标自动计算到最后一天）
+    if not estimated_df.empty:
+        tech_df = compute_technical(estimated_df, cfg, save_dir, fund_code)
+    else:
+        tech_df = compute_technical(nav_df, cfg, save_dir, fund_code)
+        
     tech_html = plot_technical(tech_df, cfg, fund_code, save_dir)
 
-    # 4. 风险指标
+    # 5. 风险指标
     metrics = compute_risk_metrics(tech_df, cfg, fund_code,
                                    benchmark=cfg.get("benchmark"),
                                    aum=aum_val)
@@ -930,7 +984,7 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
         aum_date=aum_date,
     ) if metrics else None
 
-    # 5. 累计超额收益曲线（需要基准）
+    # 6. 累计超额收益曲线（需要基准）
     excess_html = None
     if cfg.get("benchmark"):
         excess_html = plot_excess_return(
@@ -966,6 +1020,11 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
 
 
 def main():
+    import os
+    os.chdir(Path(__file__).parent)
+    
+    root = tk.Tk()
+
     parser = argparse.ArgumentParser(
         description="Fund Analyzer — 输入基金代码，输出净值、持仓、技术指标、风险指标")
     parser.add_argument("fund_code", help="基金代码（如 017436）")
@@ -1061,7 +1120,104 @@ def generate_master_report(fund_code: str, save_dir: Path) -> Path:
 # ============================================================
 # 5. 盘后/盘前交易监控（解决 QDII 时差盲盒）
 # ============================================================
-import yfinance as yf
+# ============================================================
+# yfinance 隔離調用（避免 curl_cffi 在多線程下 segfault）
+# ============================================================
+import subprocess
+import sys as _sys
+import json as _json
+from pathlib import Path as _Path
+
+_YF_HELPER = _Path(__file__).resolve().parent / "yf_helper.py"
+
+
+def _yf_run(payload: dict, timeout: int = 90) -> dict:
+    """在子進程中調用 yfinance，返回 dict。崩潰不影響主進程。"""
+    if not _YF_HELPER.exists():
+        return {"error": "yf_helper.py not found"}
+    
+    # 【修復】如果是 pythonw.exe，替換為 python.exe 啟動子進程，防止管道死鎖
+    exe = _sys.executable
+    if exe.endswith("pythonw.exe"):
+        exe_py = exe.replace("pythonw.exe", "python.exe")
+        if _Path(exe_py).exists():
+            exe = exe_py
+
+    creationflags = 0
+    if _sys.platform == "win32":
+        creationflags = subprocess.CREATE_NO_WINDOW
+        
+    try:
+        proc = subprocess.run(
+            [exe, str(_YF_HELPER)],
+            input=_json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=creationflags,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    except Exception as e:
+        return {"error": f"subprocess failed: {e}"}
+
+    if proc.returncode != 0:
+        return {"error": f"subprocess exit {proc.returncode}: {(proc.stderr or '')[-500:]}"}
+
+    out = (proc.stdout or "").strip()
+    try:
+        return _json.loads(out)
+    except _json.JSONDecodeError:
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+        return {"error": f"invalid JSON from helper: {out[-500:]}"}
+
+
+def _yf_download_df(tickers, period="1y", interval="1d",
+                    prepost=False, group_by="column"):
+    """yf.download 的隔離版本。返回 DataFrame 或 None。"""
+    res = _yf_run({
+        "action": "download",
+        "tickers": tickers if isinstance(tickers, list) else [tickers],
+        "period": period,
+        "interval": interval,
+        "prepost": prepost,
+        "group_by": group_by,
+    })
+    if "error" in res or res.get("empty", True):
+        log.warning(f"yf_download 失敗: {res.get('error', 'empty')}")
+        return None
+
+    index = pd.to_datetime(res["index"])
+    cols = res["columns"]
+    if cols and isinstance(cols[0], list):
+        columns = pd.MultiIndex.from_tuples([tuple(c) for c in cols])
+    else:
+        columns = cols
+    df = pd.DataFrame(res["data"], index=index, columns=columns)
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    return df
+
+
+def _yf_ticker_history(ticker, period="5d"):
+    """yf.Ticker(t).history() 的隔離版本。返回 DataFrame 或 None。"""
+    res = _yf_run({"action": "history", "ticker": ticker, "period": period})
+    if "error" in res or res.get("empty", True):
+        log.warning(f"yf_history({ticker}) 失敗: {res.get('error', 'empty')}")
+        return None
+    df = pd.DataFrame(
+        res["data"],
+        index=pd.to_datetime(res["index"]),
+        columns=res["columns"],
+    )
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    return df
 
 def fetch_post_market_estimate(fund_code: str, save_dir: Path) -> dict:
     """
@@ -1091,14 +1247,13 @@ def fetch_post_market_estimate(fund_code: str, save_dir: Path) -> dict:
 
     # 2. 获取纳指期货数据
     try:
-        nq = yf.Ticker("NQ=F")
-        nq_hist = nq.history(period="5d").dropna()
-        if len(nq_hist) >= 2:
+        nq_hist = _yf_ticker_history("NQ=F", period="5d")
+        if nq_hist is not None and len(nq_hist) >= 2:
             nq_last = nq_hist['Close'].iloc[-1]
             nq_prev = nq_hist['Close'].iloc[-2]
             result["nq_futures_return"] = (nq_last / nq_prev - 1) * 100
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[{fund_code}] 纳指期货获取失败: {e}")
 
     # 3. 获取最新持仓
     clean_csv = save_dir / f"{fund_code}_holdings_clean.csv"
@@ -1133,42 +1288,44 @@ def fetch_post_market_estimate(fund_code: str, save_dir: Path) -> dict:
 
     # 4. 批量获取日线数据（获取昨收价）
     daily_close = {}
-    try:
-        # 批量下载最近5天数据，确保有至少2天的有效数据
-        df_daily_all = yf.download(tickers_list, period="5d", progress=False, group_by="ticker")
-        for t in tickers_list:
+    df_daily_all = _yf_download_df(tickers_list, period="5d", group_by="column")
+    if df_daily_all is not None:
+        try:
             if isinstance(df_daily_all.columns, pd.MultiIndex):
-                # 处理多级列索引
-                if 'Close' in df_daily_all[t].columns:
-                    df_clean = df_daily_all[t]['Close'].dropna()
-                    if not df_clean.empty:
-                        daily_close[t] = df_clean.iloc[-1]
+                for t in tickers_list:
+                    try:
+                        col = df_daily_all[("Close", t)].dropna()
+                        if not col.empty:
+                            daily_close[t] = col.iloc[-1]
+                    except KeyError:
+                        pass
             else:
-                if 'Close' in df_daily_all.columns:
-                    df_clean = df_daily_all['Close'].dropna()
-                    if not df_clean.empty:
-                        daily_close[t] = df_clean.iloc[-1]
-    except Exception as e:
-        print(f"批量获取日线失败: {e}")
+                col = df_daily_all["Close"].dropna()
+                if not col.empty:
+                    daily_close[tickers_list[0]] = col.iloc[-1]
+        except Exception as e:
+            log.warning(f"[{fund_code}] 解析日线失败: {e}")
 
     # 5. 批量获取分钟线数据（包含盘前/盘后）
     latest_price = {}
-    try:
-        # 批量请求，1分钟间隔，包含盘前盘后，获取最近5天
-        df_intra_all = yf.download(tickers_list, period="5d", interval="1m", prepost=True, progress=False, group_by="ticker")
-        for t in tickers_list:
+    df_intra_all = _yf_download_df(tickers_list, period="5d", interval="1m",
+                                    prepost=True, group_by="column")
+    if df_intra_all is not None:
+        try:
             if isinstance(df_intra_all.columns, pd.MultiIndex):
-                if 'Close' in df_intra_all[t].columns:
-                    df_clean = df_intra_all[t]['Close'].dropna()
-                    if not df_clean.empty:
-                        latest_price[t] = df_clean.iloc[-1]
+                for t in tickers_list:
+                    try:
+                        col = df_intra_all[("Close", t)].dropna()
+                        if not col.empty:
+                            latest_price[t] = col.iloc[-1]
+                    except KeyError:
+                        pass
             else:
-                if 'Close' in df_intra_all.columns:
-                    df_clean = df_intra_all['Close'].dropna()
-                    if not df_clean.empty:
-                        latest_price[t] = df_clean.iloc[-1]
-    except Exception as e:
-        print(f"批量获取分钟线失败: {e}")
+                col = df_intra_all["Close"].dropna()
+                if not col.empty:
+                    latest_price[tickers_list[0]] = col.iloc[-1]
+        except Exception as e:
+            log.warning(f"[{fund_code}] 解析分钟线失败: {e}")
 
     # 6. 组装结果并计算
     total_weight_valid = 0
@@ -1230,6 +1387,236 @@ def fetch_post_market_estimate(fund_code: str, save_dir: Path) -> dict:
         result["message"] = "❌ 所有股票均无法获取盘后数据，无法预估"
 
     return result
+
+def estimate_latest_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
+    """
+    结合持仓权重、纳指和汇率，利用多元线性回归估算 T-1 日的基金净值。
+    返回带有 'IsEstimated' 标记的 DataFrame。
+    """
+    log.info(f"[{fund_code}] 正在使用回归模型估算最新净值 ...")
+    
+    # 1. 读取原始净值数据
+    nav_csv = save_dir / f"{fund_code}_daily_nav.csv"
+    if not nav_csv.exists():
+        return pd.DataFrame()
+    
+    df_nav = pd.read_csv(nav_csv)
+    # 【修复】标准化日期并去重，防止 join 产生笛卡尔积撑爆内存
+    df_nav["Date"] = pd.to_datetime(df_nav["Date"]).dt.normalize()
+    df_nav = df_nav.drop_duplicates(subset=["Date"], keep="last")
+    df_nav = df_nav.sort_values("Date").set_index("Date")
+    df_nav["DailyRet"] = df_nav["NAV"].pct_change()
+    
+    # 默认返回的保底数据
+    fallback_df = df_nav.reset_index()
+    fallback_df["IsEstimated"] = False
+    
+    # 2. 获取纳斯达克指数和汇率数据
+    try:
+        ndx_data = _yf_download_df("^NDX", period="1y")
+        cny_data = _yf_download_df("CNY=X", period="1y")
+        if ndx_data is None or cny_data is None:
+            log.warning(f"[{fund_code}] 宏觀因子下載失敗，跳過估算")
+            return fallback_df
+
+        def _pick_close(df):
+            c = df["Close"]
+            return c.iloc[:, 0] if isinstance(c, pd.DataFrame) else c
+
+        macro_data = pd.DataFrame({
+            "^NDX": _pick_close(ndx_data),
+            "CNY=X": _pick_close(cny_data),
+        })
+        # 【修复】标准化日期并去重
+        macro_data.index = pd.to_datetime(macro_data.index).dt.normalize()
+        macro_data = macro_data.drop_duplicates(keep="last").dropna()
+        macro_ret = macro_data.pct_change().rename(
+            columns={"^NDX": "NDX_Ret", "CNY=X": "FX_Ret"}
+        )
+    except Exception as e:
+        log.warning(f"[{fund_code}] 获取宏观因子失败: {e}")
+        return fallback_df
+
+    # 3. 计算前十大持仓组合的收益率
+    clean_csv = save_dir / f"{fund_code}_holdings_clean.csv"
+    port_ret_series = pd.Series(dtype=float)
+    
+    if clean_csv.exists():
+        try:
+            df_holdings = pd.read_csv(clean_csv)
+            latest_q = df_holdings["QuarterLabel"].iloc[0]
+            latest_10 = df_holdings[df_holdings["QuarterLabel"] == latest_q].head(10)
+            
+            tickers_10 = [str(t).strip() for t in latest_10["StockCode"] if str(t).strip().isalpha()]
+            weights_10 = (latest_10["Weight"] / 100).values
+            
+            if tickers_10:
+                df_all = _yf_download_df(tickers_10, period="1y", group_by="column")
+                if df_all is None:
+                    raise RuntimeError("股票数据下载失败")
+                closes = df_all["Close"]
+                if isinstance(closes, pd.Series):
+                    closes = closes.to_frame(name=tickers_10[0])
+                stock_ret = closes.pct_change()
+
+                w = weights_10[:len(stock_ret.columns)]
+                port_ret_series = (stock_ret * w).sum(axis=1)
+                port_ret_series.name = "Portfolio_Ret"
+                port_ret_series.index = pd.to_datetime(port_ret_series.index).dt.normalize()
+                port_ret_series = port_ret_series.drop_duplicates(keep="last")
+        except Exception as e:
+            log.warning(f"[{fund_code}] 计算持仓组合收益失败: {e}")
+
+    # 4. 合并数据（全部改用 pd.merge 防爆炸）
+    merged = pd.merge(df_nav[["DailyRet"]], macro_ret, left_index=True, right_index=True, how="inner")
+    if not port_ret_series.empty:
+        merged = pd.merge(merged, port_ret_series, left_index=True, right_index=True, how="inner")
+    
+    merged = merged.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if len(merged) < 20:
+        log.warning(f"[{fund_code}] 有效重叠数据不足 20 天，无法回归。")
+        return fallback_df
+
+    # 5. 多元线性回归（纯 numpy）
+    X_cols = ["NDX_Ret", "FX_Ret"]
+    if not port_ret_series.empty:
+        X_cols.append("Portfolio_Ret")
+        
+    # 提取 numpy 数组，强制转为 float 并添加常数项 1.0
+    X_raw = merged[X_cols].astype(float).values
+    X_np = np.column_stack((np.ones(len(X_raw)), X_raw))
+    y_np = merged["DailyRet"].astype(float).values
+    
+    try:
+        coeffs, residuals, rank, s = np.linalg.lstsq(X_np, y_np, rcond=None)
+        y_pred = X_np.dot(coeffs)
+        ss_res = np.sum((y_np - y_pred) ** 2)
+        ss_tot = np.sum((y_np - np.mean(y_np)) ** 2)
+        r_squared = 1 - (ss_res / (ss_tot + 1e-12))
+        log.info(f"[{fund_code}] 回归拟合成功，R-squared = {r_squared:.4f}")
+    except Exception as e:
+        log.warning(f"[{fund_code}] 回归失败: {e}")
+        return fallback_df
+
+    # 6. 获取最新的宏观因子数据 (T-1日)
+    last_nav_date = merged.index.max()
+    latest_macro = macro_ret[macro_ret.index >= last_nav_date]
+    
+    if latest_macro.empty:
+        log.info(f"[{fund_code}] 暂无最新的美股交易数据可供预测。")
+        return fallback_df
+
+    latest_row = latest_macro.iloc[-1]
+    latest_date = latest_macro.index[-1]
+    
+    # 构建预测输入的 X
+    predict_vals = [1.0, latest_row["NDX_Ret"], latest_row["FX_Ret"]]
+    if not port_ret_series.empty:
+        latest_port_ret = port_ret_series.get(latest_date, 0.0)
+        if pd.isna(latest_port_ret):
+            latest_port_ret = 0.0
+        predict_vals.append(latest_port_ret)
+
+    # 7. 预测最新收益率并推算净值
+    try:
+        est_return = np.dot(np.array(predict_vals, dtype=float), coeffs)
+        est_return = max(min(est_return, 0.15), -0.15)
+        last_real_nav = df_nav["NAV"].iloc[-1]
+        est_nav = last_real_nav * (1 + est_return)
+        log.info(f"[{fund_code}] 预测日期: {latest_date.date()} | 预估收益率: {est_return*100:+.2f}% | 预估净值: {est_nav:.4f}")
+    except Exception as e:
+        log.warning(f"[{fund_code}] 预测失败: {e}")
+        return fallback_df
+
+    # 8. 将预估点拼接到原 DataFrame
+    new_row = pd.DataFrame({
+        "Date": [latest_date],
+        "NAV": [est_nav],
+        "IsEstimated": [True]
+    })
+    
+    final_df = pd.concat([fallback_df, new_row], ignore_index=True)
+    final_df = final_df.sort_values("Date").reset_index(drop=True)
+    
+    return final_df
+
+
+def plot_estimated_trend(df: pd.DataFrame, fund_code: str, save_dir: Path) -> Path:
+    """绘制带有 T-1 日预估点的净值走势图"""
+    log.info(f"[{fund_code}] 生成最新净值预估趋势图 ...")
+    
+    # 防御性检查
+    if "IsEstimated" not in df.columns:
+        df["IsEstimated"] = False
+        
+    # 分离真实数据和预估数据
+    real_df = df[df["IsEstimated"] == False]
+    est_df = df[df["IsEstimated"] == True]
+    
+    # 为了让预估点和实线连接，把真实数据的最后一个点也加进预估序列
+    if not est_df.empty and not real_df.empty:
+        last_real = real_df.iloc[[-1]]
+        est_line_df = pd.concat([last_real, est_df]).copy()
+        est_line_df["IsEstimated"] = True
+    else:
+        est_line_df = pd.DataFrame()
+
+    fig = go.Figure()
+
+    # 1. 真实净值实线
+    fig.add_trace(go.Scatter(
+        x=real_df["Date"], y=real_df["NAV"],
+        mode="lines", name="Official NAV",
+        line=dict(color="#1f77b4", width=1.8),
+        hovertemplate="%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>",
+    ))
+
+    # 2. 预估净值虚线与空心点
+    if not est_line_df.empty:
+        fig.add_trace(go.Scatter(
+            x=est_line_df["Date"], y=est_line_df["NAV"],
+            mode="lines+markers", name="Estimated T-1 NAV",
+            line=dict(color="#d62728", width=1.8, dash="dash"),
+            marker=dict(size=8, color="#d62728", symbol="circle-open", line=dict(width=2)),
+            hovertemplate="<b>Estimated</b><br>%{x|%Y-%m-%d}<br>NAV: %{y:.4f}<extra></extra>",
+        ))
+        
+        # 添加文本标注
+        latest_est = est_line_df.iloc[-1]
+        fig.add_annotation(
+            x=latest_est["Date"], y=latest_est["NAV"],
+            text=f"Est: {latest_est['NAV']:.4f}",
+            showarrow=True, arrowhead=2, ax=0, ay=-30,
+            font=dict(size=11, color="#d62728", weight="bold"),
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor="#d62728", borderwidth=1,
+        )
+
+    fig.update_layout(
+        title=dict(
+            text=f"{fund_code}<br><sup>Official NAV vs Estimated Latest NAV (T-1)</sup>",
+            font=dict(size=17),
+        ),
+        xaxis=dict(
+            title="Date",
+            rangeslider=dict(visible=True),
+            type="date",
+        ),
+        yaxis=dict(title="Unit NAV (CNY)", autorange=True, fixedrange=False),
+        hovermode="x unified",
+        template="plotly_white",
+        height=600,
+        margin=dict(l=60, r=40, t=100, b=60),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+        ),
+    )
+    
+    out = save_dir / f"{fund_code}_estimated_nav.html"
+    fig.write_html(out, include_plotlyjs="cdn")
+    log.info(f"[{fund_code}] 预估净值图 → {out.name}")
+    return out
 
 if __name__ == "__main__":
     main()

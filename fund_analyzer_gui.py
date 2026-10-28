@@ -8,6 +8,32 @@ Fund Analyzer GUI — 圖形界面版
 Usage:
     python fund_analyzer_gui.py
 """
+import os
+import sys
+from pathlib import Path
+
+# ============================================================
+# 關鍵：pythonw.exe 下 sys.stdout / sys.stderr 為 None
+# 任何 print / traceback.print_exc / Tkinter 默認回調處理
+# 都會拋 AttributeError，導致主線程或 mainloop 崩潰（閃退）
+# 這裡統一兜底到一個日誌文件，便於排查
+# ============================================================
+if sys.stdout is None or sys.stderr is None:
+    _debug_log = Path(__file__).resolve().parent / "gui_debug.log"
+    try:
+        _fh = open(_debug_log, "a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = _fh
+        if sys.stderr is None:
+            sys.stderr = _fh
+    except Exception:
+        # 最後兜底：寫入 devnull，保證不是 None
+        _devnull = open(os.devnull, "w", encoding="utf-8")
+        if sys.stdout is None:
+            sys.stdout = _devnull
+        if sys.stderr is None:
+            sys.stderr = _devnull
+
 import queue
 import logging
 import threading
@@ -17,11 +43,43 @@ from tkinter import ttk, messagebox, scrolledtext
 from pathlib import Path
 from datetime import datetime
 import time
-import webview  # 需要先 pip install pywebview
 import threading
+import traceback
+import sys
+
+log = logging.getLogger("fund_analyzer")
 
 # 導入核心邏輯
 from fund_analyzer import analyze_fund
+
+def show_error(exc_type, exc_value, exc_traceback):
+    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+
+    # 1) 寫入 logging（不依賴 stdout）
+    try:
+        logging.getLogger("fund_analyzer").critical(
+            "未捕獲異常:\n%s", error_msg
+        )
+    except Exception:
+        pass
+
+    # 2) 寫入 crash.log 兜底
+    try:
+        with open(Path(__file__).resolve().parent / "crash.log",
+                  "a", encoding="utf-8") as f:
+            f.write(error_msg + "\n")
+    except Exception:
+        pass
+
+    # 3) 嘗試彈窗（失敗也不要讓 excepthook 再炸一次）
+    try:
+        messagebox.showerror("程序发生异常", f"发生错误:\n\n{error_msg[-1000:]}")
+    except Exception:
+        pass
+
+    sys.exit(1)
+
+sys.excepthook = show_error
 
 
 # ============================================================
@@ -295,8 +353,7 @@ class FundAnalyzerGUI:
             )
             self.root.after(0, self._on_analysis_done, summary, None)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            log.exception("分析线程异常")
             self.root.after(0, self._on_analysis_done, None, e)
 
     def _on_analysis_done(self, summary, error):
@@ -407,18 +464,25 @@ class FundAnalyzerGUI:
             messagebox.showwarning("提示", "综合报告尚未生成。")
             return
 
-        # pywebview 创建独立的桌面视窗
         try:
-            window = webview.create_window(
+            import webview
+            webview.create_window(
                 title="Fund Analyzer 综合报告",
                 url=self._master_report_path.as_uri(),
                 width=1280,
                 height=900,
-                background_color="#f0f2f5"
+                background_color="#f0f2f5",
             )
             webview.start()
+        except ImportError as e:
+            log.warning("pywebview 不可用，回退到瀏覽器: %s", e)
+            webbrowser.open(self._master_report_path.as_uri())
         except Exception as e:
-            messagebox.showerror("错误", f"无法打开视窗: {e}\n将回退到默认浏览器。")
+            log.exception("pywebview 打開失敗")
+            messagebox.showerror(
+                "错误",
+                f"无法打开视窗: {e}\n将回退到默认浏览器。",
+            )
             webbrowser.open(self._master_report_path.as_uri())
 
     def open_output_dir(self):
@@ -572,7 +636,29 @@ class PostMarketWindow(tk.Toplevel):
 def main():
     root = tk.Tk()
 
-    # 使用較現代的主題（Windows 上可用 vista，其他平台 fallback）
+    # ---- 關鍵：Tkinter 默認的 report_callback_exception 會 print 到
+    # sys.stderr，pythonw 下會二次崩潰，直接讓 mainloop 退出（閃退）
+    def _report_callback_exception(exc, val, tb):
+        err = "".join(traceback.format_exception(exc, val, tb))
+        try:
+            logging.getLogger("fund_analyzer").error(
+                "Tk 回調異常:\n%s", err
+            )
+        except Exception:
+            pass
+        try:
+            with open(Path(__file__).resolve().parent / "crash.log",
+                      "a", encoding="utf-8") as f:
+                f.write("[Tk callback]\n" + err + "\n")
+        except Exception:
+            pass
+        try:
+            messagebox.showerror("界面回调异常", f"发生错误:\n\n{err[-800:]}")
+        except Exception:
+            pass
+
+    root.report_callback_exception = _report_callback_exception
+
     try:
         style = ttk.Style()
         for theme in ("vista", "winnative", "clam", "default"):

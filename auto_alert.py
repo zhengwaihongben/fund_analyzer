@@ -148,5 +148,7 @@ def run_monitor():
     else:
         print(f"{current_time.strftime('%H:%M')} 扫描完成，所有基金均未触发异动阈值。")
 
+
+
 if __name__ == "__main__":
     run_monitor()
