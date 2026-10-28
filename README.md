@@ -146,16 +146,28 @@ The first time you run `python auto_alert.py`, it generates a `alert_config.txt`
 ```
 
 **Step 2: Set up Windows Task Scheduler**
-1. Press `Win + S`, search for **Task Scheduler** (任务计划程序).
-2. Click **Create Basic Task** on the right.
-3. **Name**: `FundAnalyzer_AutoAlert`.
-4. **Trigger**: Daily, Start time: `14:30:00`.
-5. **Action**: Start a program.
-6. **Program/script**: Path to your `pythonw.exe` (e.g., `C:\Users\user\anaconda3\envs\quant-finance\pythonw.exe`).
-7. **Add arguments**: `"C:\path\to\your\fund_analyzer\auto_alert.py"`.
-8. **Start in**: `C:\path\to\your\fund_analyzer`.
-9. Finish and open Properties. Go to the **Settings** tab and check **"Run task as soon as possible after a scheduled start is missed"**.
-10. Click OK.
+
+To run the script automatically every day at 14:30 Beijing Time:
+
+1. **Find your absolute paths first**:
+   - Open terminal (cmd/PowerShell) and run `where pythonw` to get the path to your Python environment (e.g., `C:\Users\user\anaconda3\envs\quant-finance\pythonw.exe`).
+   - Note the absolute path to your project folder (e.g., `C:\Users\user\Desktop\Finance\codes\alipay_funds\fund_analyzer`).
+
+2. **Create the Task**:
+   - Press `Win + S`, search for **Task Scheduler** (任务计划程序) and open it.
+   - On the right panel, click **Create Basic Task...** (创建基本任务).
+   - **Name**: `FundAnalyzer_AutoAlert`.
+   - **Trigger**: Select **Daily** (每天), set Start time to `14:30:00`.
+   - **Action**: Select **Start a program** (启动程序).
+   - **Program/script**: Paste the `pythonw.exe` path.
+   - **Add arguments**: Paste the path to the script with quotes: `"C:\path\to\your\fund_analyzer\auto_alert.py"`.
+   - **Start in**: Paste your project folder path: `C:\Users\user\Desktop\Finance\codes\alipay_funds\fund_analyzer` (This is **CRITICAL** for finding dependencies).
+
+3. **Enable Catch-up**:
+   - After finishing, check the box **"Open the Properties dialog for this task when I click Finish"**.
+   - Go to the **Settings** (设置) tab.
+   - Check **"Run task as soon as possible after a scheduled start is missed"** (如果错过计划开始时间，请尽快启动任务).
+   - Click OK.
 
 **What happens next?**
 Every day at 14:30, it silently checks the data. If any of the following thresholds are met, a window will pop up in the bottom right corner of your screen:
