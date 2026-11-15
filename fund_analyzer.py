@@ -1501,11 +1501,14 @@ def estimate_latest_nav(fund_code: str, save_dir: Path) -> pd.DataFrame:
 
     # 6. 获取最新的宏观因子数据 (T-1日)
     last_nav_date = merged.index.max()
+    # 考虑到时差，如果宏观数据的最新日期跟净值一样，或者只落后一天，也强行取最后一条
     latest_macro = macro_ret[macro_ret.index >= last_nav_date]
     
     if latest_macro.empty:
-        log.info(f"[{fund_code}] 暂无最新的美股交易数据可供预测。")
+        log.warning(f"[{fund_code}] 宏觀數據 ({macro_ret.index.max().date()}) 沒有晚於基金淨值 ({last_nav_date.date()})，跳過預估。")
         return fallback_df
+        
+    log.info(f"[{fund_code}] 宏觀數據最新日期: {latest_macro.index.max().date()}，準備計算預估...") 
 
     latest_row = latest_macro.iloc[-1]
     latest_date = latest_macro.index[-1]
