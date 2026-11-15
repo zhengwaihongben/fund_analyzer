@@ -112,68 +112,11 @@ python fund_analyzer.py <fund_code> [options]
 
 ```bash
 # Full analysis from inception
-python fund_analyzer.py 017436 --risk-free 0.02 --benchmark .NDX --show
+python fund_analyzer.py 017436 --risk-free 0.02 --benchmark .NDX --sho
 
 # Track only from a specific date
 python fund_analyzer.py 017436 --start-date 2023-01-01 --show
 ```
-
-## Advanced Features: Post-Market & Auto-Alerts
-
-### 1. Post-Market Monitor (GUI)
-
-Because QDII funds trade on US markets, the official NAV you see at 15:00 Beijing Time is actually yesterday's US close. To solve this "blind box", the GUI includes a **Post-Market Monitor**.
-
-- **How it works**: It reads your latest holdings CSV, fetches the pre/post-market prices of the top 10 US stocks (via `yfinance`), and calculates a weighted estimated return.
-- **When to use**: Around 14:30 - 14:55 Beijing Time, before you place an order on Alipay.
-- **What it shows**: 
-  - Yesterday's official NAV change.
-  - Nasdaq 100 Futures (`NQ=F`) change.
-  - Estimated tonight's change based on current pre/post-market prices.
-  - Color-coded (Red for Up, Green for Down) details for each stock.
-
-### 2. Auto-Alert Script (Windows Task Scheduler)
-
-If you don't want to open the GUI every day, you can use the `auto_alert.py` script to run in the background automatically.
-
-**Step 1: Configure which funds to monitor**
-The first time you run `python auto_alert.py`, it generates a `alert_config.txt` in the project folder. Open it with Notepad and add your fund codes (one per line):
-
-```text
-# Monitor my QDII funds
-017436
-000369
-```
-
-**Step 2: Set up Windows Task Scheduler**
-
-To run the script automatically every day at 14:30 Beijing Time:
-
-1. **Find your absolute paths first**:
-   - Open terminal (cmd/PowerShell) and run `where pythonw` to get the path to your Python environment (e.g., `C:\Users\user\anaconda3\envs\quant-finance\pythonw.exe`).
-   - Note the absolute path to your project folder (e.g., `C:\Users\user\Desktop\Finance\codes\alipay_funds\fund_analyzer`).
-
-2. **Create the Task**:
-   - Press `Win + S`, search for **Task Scheduler** (任务计划程序) and open it.
-   - On the right panel, click **Create Basic Task...** (创建基本任务).
-   - **Name**: `FundAnalyzer_AutoAlert`.
-   - **Trigger**: Select **Daily** (每天), set Start time to `14:30:00`.
-   - **Action**: Select **Start a program** (启动程序).
-   - **Program/script**: Paste the `pythonw.exe` path.
-   - **Add arguments**: Paste the path to the script with quotes: `"C:\path\to\your\fund_analyzer\auto_alert.py"`.
-   - **Start in**: Paste your project folder path: `C:\Users\user\Desktop\Finance\codes\alipay_funds\fund_analyzer` (This is **CRITICAL** for finding dependencies).
-
-3. **Enable Catch-up**:
-   - After finishing, check the box **"Open the Properties dialog for this task when I click Finish"**.
-   - Go to the **Settings** (设置) tab.
-   - Check **"Run task as soon as possible after a scheduled start is missed"** (如果错过计划开始时间，请尽快启动任务).
-   - Click OK.
-
-**What happens next?**
-Every day at 14:30, it silently checks the data. If any of the following thresholds are met, a window will pop up in the bottom right corner of your screen:
-- Nasdaq 100 Futures moves > ±1%.
-- Estimated portfolio return > ±1.5%.
-- Any top 10 stock moves > ±3% (usually due to earnings reports).
 
 ## Output
 
