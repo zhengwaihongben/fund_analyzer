@@ -7,7 +7,13 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
+# 建立專案內虛擬環境，與 install.bat / launch.vbs 保持一致
+if [ ! -x ".venv/bin/python" ]; then
+    echo "Creating virtual environment .venv ..."
+    python3 -m venv .venv
+fi
 
-echo "Done. Run: python3 fund_analyzer_gui.py"
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+
+echo "Done. Run: ./.venv/bin/python fund_analyzer_gui.py"
