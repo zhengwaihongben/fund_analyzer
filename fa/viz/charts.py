@@ -4,7 +4,6 @@ from pathlib import Path
 
 from plotly.subplots import make_subplots
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 
 from fa.config import COLOR_MAP
@@ -51,74 +50,68 @@ def plot_trend(df: pd.DataFrame, fund_code: str, save_dir: Path) -> Path:
     return out
 
 
-def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path, start_date: str = None):
+def plot_holdings(holdings: pd.DataFrame, fund_code: str, save_dir: Path):
+    """最新季度持倉佔比餅圖（只輸出最新一季，不保留歷史持倉）。"""
     if holdings.empty:
         return None
-    log.info(f"[{fund_code}] 生成持仓堆叠面积图 ...")
+    log.info(f"[{fund_code}] 生成最新季度持倉餅圖 ...")
 
     holdings = _clean_holdings(holdings)
     if "Weight" not in holdings.columns or "QuarterLabel" not in holdings.columns:
         log.warning(f"[{fund_code}] 持仓数据字段不足，跳过绘图")
         return None
 
-    # 新增：按 start_date 过滤季度数据
-    if start_date:
-        try:
-            start_year = pd.to_datetime(start_date).year
-            # 提取 QuarterLabel 的年份部分并过滤
-            holdings = holdings[
-                holdings["QuarterLabel"].astype(str).str[:4].astype(int) >= start_year
-            ]
-            if holdings.empty:
-                log.warning(f"[{fund_code}] 按起始年份 {start_year} 过滤后无持仓数据，跳过绘图")
-                return None
-        except Exception as e:
-            log.warning(f"[{fund_code}] 过滤持仓年份失败: {e}")
-
-    clean_path = save_dir / f"{fund_code}_holdings_clean.csv"
-    holdings.to_csv(clean_path, index=False, encoding="utf-8-sig")
-
-    qorder = list(holdings["QuarterLabel"].cat.categories)
     latest_q = latest_quarter_label(holdings)
     latest = top_holdings(holdings, 10)[["StockCode", "Stock", "Weight"]]
-    top_stocks = latest["Stock"].tolist()
+    if latest.empty:
+        log.warning(f"[{fund_code}] 无最新季度持仓，跳过绘图")
+        return None
+
+    # 只保留最新季度：下游（盤後估算、報告）不再看到歷史季度
+    latest_rows = holdings[holdings["QuarterLabel"].astype(str) == str(latest_q)].copy()
+    clean_path = save_dir / f"{fund_code}_holdings_clean.csv"
+    latest_rows.to_csv(clean_path, index=False, encoding="utf-8-sig")
 
     log.info(f"[{fund_code}] 最新季度 {latest_q} 前十大重仓股:")
-    for i, row in latest.iterrows():
-        code   = row["StockCode"]
-        name   = row["Stock"]
-        weight = row["Weight"]
-        log.info(f"  {i+1:>2}. {code:<10}{name:<26}{weight:>8.2f}%")
-    total = latest["Weight"].sum()
-    log.info(f"      Top 10 Total: {total:.2f}%")
+    for i, (_, row) in enumerate(latest.iterrows(), start=1):
+        log.info(f"  {i:>2}. {row['StockCode']:<10}{row['Stock']:<26}{row['Weight']:>8.2f}%")
+    total = float(latest["Weight"].sum())
+    rest = max(0.0, 100.0 - total)
+    log.info(f"      Top 10 Total: {total:.2f}%    其他（未披露）: {rest:.2f}%")
 
-    full_idx = pd.MultiIndex.from_product(
-        [qorder, top_stocks], names=["QuarterLabel", "Stock"]
-    )
-    plot_df = (holdings[holdings["Stock"].isin(top_stocks)]
-               .groupby(["QuarterLabel", "Stock"])["Weight"]
-               .sum().reindex(full_idx, fill_value=0).reset_index())
+    labels = [str(name) for name in latest["Stock"]]
+    values = [float(w) for w in latest["Weight"]]
+    codes = [str(code) for code in latest["StockCode"]]
+    if rest > 0.01:
+        labels.append("其他（未披露）")
+        values.append(round(rest, 2))
+        codes.append("")
 
-    fig = px.area(
-        plot_df, x="QuarterLabel", y="Weight", color="Stock",
-        title=(
-            f"{fund_code}"
-            f"<br><sup>Top 10 Holdings Weight Over Time</sup>"
-        ),
-        labels={"Weight": "Weight (% of NAV)",
-                "QuarterLabel": "Quarter", "Stock": "Stock"},
-        template="plotly_white", height=620,
+    fig = go.Figure(
+        go.Pie(
+            labels=labels,
+            values=values,
+            customdata=codes,
+            hole=0.45,
+            sort=False,
+            direction="clockwise",
+            texttemplate="%{label}<br>%{value:.2f}%",
+            textposition="inside",
+            textfont=dict(size=11),
+            hovertemplate="%{label}<br>%{customdata}<br>占净值 %{value:.2f}%<extra></extra>",
+        )
     )
     fig.update_layout(
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
-        margin=dict(l=60, r=40, t=110, b=60),
-        xaxis=dict(type="category", title="Quarter"),
-        yaxis=dict(title="Weight (% of NAV)"),
+        title=(
+            f"{fund_code} · 最新季度持仓（{latest_q}）"
+            f"<br><sup>前十大合计 {total:.2f}%，其余 {rest:.2f}% 为未披露持仓/其他资产</sup>"
+        ),
+        template="plotly_white", height=620, showlegend=False,
+        margin=dict(l=40, r=40, t=110, b=40),
     )
-    out = save_dir / f"{fund_code}_holdings_area.html"
+    out = save_dir / f"{fund_code}_holdings_pie.html"
     fig.write_html(out, include_plotlyjs="cdn")
-    log.info(f"[{fund_code}] 持仓图 → {out.name}")
+    log.info(f"[{fund_code}] 持仓饼图 → {out.name}")
     return out
 
 

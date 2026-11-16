@@ -23,6 +23,8 @@ DEFAULT_CONFIG = {
     "benchmark":    ".NDX",
     "benchmark_market": "auto",
     "start_date":   None,
+    # 基金類型：auto = 依基金資料自動判斷；standard / qdii = 強制
+    "fund_type":    "auto",
 }
 
 COLOR_MAP = {

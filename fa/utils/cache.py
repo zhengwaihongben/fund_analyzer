@@ -24,6 +24,8 @@ DATA_FILE_SUFFIXES = (
     "_daily_nav.csv",
     "_holdings_raw.csv",
     "_holdings_clean.csv",
+    "_qdii_holdings.csv",
+    "_qdii_estimates.csv",
 )
 
 

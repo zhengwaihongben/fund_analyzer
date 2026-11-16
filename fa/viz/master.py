@@ -6,7 +6,7 @@ from pathlib import Path
 def generate_master_report(fund_code: str, save_dir: Path) -> Path:
         """生成一个包含核心图表的综合 HTML 报告。"""
         charts = [
-            f"{fund_code}_holdings_area.html",
+            f"{fund_code}_holdings_pie.html",
             f"{fund_code}_nav_sma_boll.html",
             f"{fund_code}_risk_metrics.html"
         ]

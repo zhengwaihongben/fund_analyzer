@@ -5,10 +5,12 @@ from pathlib import Path
 import json
 import webbrowser
 
+from fa.analysis.nav_estimator import estimate_qdii_nav
 from fa.analysis.risk import compute_risk_metrics
 from fa.analysis.technical import compute_technical
 from fa.config import merge_config
 from fa.data.aum import fetch_aum
+from fa.data.fund_info import resolve_fund_mode
 from fa.data.holdings import fetch_holdings
 from fa.data.nav import fetch_nav
 from fa.utils.cache import _prune_stale_outputs
@@ -56,7 +58,7 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
 
     # 2. 持仓
     holdings = fetch_holdings(fund_code, save_dir, use_cache=use_cache, start_date=start_date)
-    holdings_html = plot_holdings(holdings, fund_code, save_dir, start_date=start_date) if not holdings.empty else None
+    holdings_html = plot_holdings(holdings, fund_code, save_dir) if not holdings.empty else None
     if holdings.empty:
         # 避免下游模組讀到上一次分析遺留的舊持倉
         (save_dir / f"{fund_code}_holdings_clean.csv").unlink(missing_ok=True)
@@ -86,7 +88,32 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
             benchmark_market=cfg.get("benchmark_market", "auto"),
         )
     
+    # 5. QDII 淨值估算（自動識別基金類型，可用 cfg["fund_type"] 覆蓋）
+    qdii_estimate = None
+    fund_mode, fund_profile = resolve_fund_mode(fund_code, cfg.get("fund_type", "auto"))
+    summary["fund_profile"] = fund_profile
+    summary["analysis_mode"] = fund_mode
+    if fund_mode == "qdii":
+        try:
+            qdii_estimate = estimate_qdii_nav(
+                fund_code, save_dir,
+                cfg={**cfg, "fund_name": fund_profile.get("name")},
+                as_of=cfg.get("qdii_as_of"),
+                use_cache=use_cache,
+            )
+        except Exception as exc:  # noqa: BLE001 - 估算失敗不應讓整份分析失敗
+            log.exception(f"[{fund_code}] QDII 淨值估算失敗")
+            qdii_estimate = {"status": "error", "fund_code": fund_code,
+                             "message": str(exc), "holdings": []}
+    summary["qdii_estimate"] = qdii_estimate
+
     # 保存汇总
+    qdii_files = {
+        name: f"{fund_code}_{name}"
+        for name in ("qdii_holdings.csv", "qdii_estimate.json", "qdii_estimates.csv",
+                     "qdii_estimate_inputs.json")
+        if (save_dir / f"{fund_code}_{name}").exists()
+    }
     summary["files"] = {
         "nav_csv":        f"{fund_code}_daily_nav.csv",
         "trend_html":     trend_html.name if trend_html else None,
@@ -97,6 +124,10 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
         "tech_html":      tech_html.name if tech_html else None,
         "risk_html":      risk_html.name if risk_html else None,
         "excess_html":    excess_html.name if excess_html else None,
+        "qdii_holdings_csv": qdii_files.get("qdii_holdings.csv"),
+        "qdii_estimate_json": qdii_files.get("qdii_estimate.json"),
+        "qdii_estimates_csv": qdii_files.get("qdii_estimates.csv"),
+        "qdii_estimate_inputs_json": qdii_files.get("qdii_estimate_inputs.json"),
     }
     summary_path = save_dir / f"{fund_code}_summary.json"
 

@@ -30,7 +30,7 @@ class AnalyzeFundTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run(self, holdings=None, use_cache=True):
+    def _run(self, holdings=None, use_cache=True, mode="standard", estimate=None):
         nav = self.nav
 
         def fake_fetch_nav(fund_code, save_dir, start_date=None):
@@ -44,12 +44,17 @@ class AnalyzeFundTests(unittest.TestCase):
             fetch_nav=mock.DEFAULT,
             fetch_aum=mock.DEFAULT,
             fetch_holdings=mock.DEFAULT,
+            resolve_fund_mode=mock.DEFAULT,
+            estimate_qdii_nav=mock.DEFAULT,
         )
         with patches as m:
             m["fetch_nav"].side_effect = fake_fetch_nav
             m["fetch_aum"].return_value = (None, None)
             m["fetch_holdings"].return_value = (
                 holdings if holdings is not None else pd.DataFrame())
+            m["resolve_fund_mode"].return_value = (
+                mode, {"name": "測試基金", "type": mode, "source": "test"})
+            m["estimate_qdii_nav"].return_value = estimate
             return analyze_fund("017436", base_output=self.out_dir,
                                 cfg={"benchmark": None}, use_cache=use_cache)
 
@@ -118,6 +123,62 @@ class AnalyzeFundTests(unittest.TestCase):
 
         self.assertFalse(summary["success"])
         self.assertIn("净值数据为空", summary["error"])
+
+    def test_standard_fund_has_no_qdii_estimate(self):
+        summary = self._run()
+        self.assertEqual(summary["analysis_mode"], "standard")
+        self.assertIsNone(summary["qdii_estimate"])
+
+    def test_qdii_estimate_lands_in_summary_and_files(self):
+        estimate = {
+            "status": "estimated",
+            "fund_code": "017436",
+            "base_nav": 1.0,
+            "estimated_nav": 1.01,
+            "estimated_return": 0.01,
+            "coverage_ratio": 0.5,
+            "holdings": [],
+        }
+        summary = self._run(mode="qdii", estimate=estimate)
+
+        self.assertEqual(summary["analysis_mode"], "qdii")
+        self.assertEqual(summary["qdii_estimate"]["estimated_nav"], 1.01)
+        on_disk = json.loads(
+            (self.save / "017436_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["qdii_estimate"]["estimated_return"], 0.01)
+        # 檔案不存在時對應欄位應為 None（避免列出不存在的文件）
+        self.assertIsNone(on_disk["files"]["qdii_estimate_json"])
+
+    def test_qdii_estimate_failure_does_not_fail_the_run(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("估算爆炸")
+
+        with mock.patch.multiple(
+            "fa.pipeline",
+            fetch_nav=mock.DEFAULT,
+            fetch_aum=mock.DEFAULT,
+            fetch_holdings=mock.DEFAULT,
+            resolve_fund_mode=mock.DEFAULT,
+            estimate_qdii_nav=mock.DEFAULT,
+        ) as m:
+            nav = self.nav
+
+            def fake_fetch_nav(fund_code, save_dir, start_date=None):
+                (Path(save_dir) / f"{fund_code}_daily_nav.csv").write_text(
+                    nav.to_csv(index=False), encoding="utf-8")
+                return nav
+
+            m["fetch_nav"].side_effect = fake_fetch_nav
+            m["fetch_aum"].return_value = (None, None)
+            m["fetch_holdings"].return_value = pd.DataFrame()
+            m["resolve_fund_mode"].return_value = ("qdii", {"name": "X"})
+            m["estimate_qdii_nav"].side_effect = boom
+            summary = analyze_fund("017436", base_output=self.out_dir,
+                                   cfg={"benchmark": None})
+
+        self.assertTrue(summary["success"])
+        self.assertEqual(summary["qdii_estimate"]["status"], "error")
+        self.assertIn("估算爆炸", summary["qdii_estimate"]["message"])
 
 
 if __name__ == "__main__":

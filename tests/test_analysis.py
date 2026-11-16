@@ -12,6 +12,7 @@ import pandas as pd
 from fa.analysis.risk import compute_risk_metrics
 from fa.analysis.technical import compute_technical
 from fa.config import merge_config
+from fa.viz.charts import plot_holdings
 
 
 def make_nav(n: int = 300, seed: int = 7) -> pd.DataFrame:
@@ -117,6 +118,40 @@ class RiskMetricTests(unittest.TestCase):
             m = compute_risk_metrics(self.df, self.cfg, "017436", benchmark=".NDX")
         self.assertIsNone(m["info_ratio"])
         self.assertIsNotNone(m["sharpe"])
+
+
+class HoldingsChartTests(unittest.TestCase):
+    """持倉只輸出最新一季，並以餅圖呈現（不再保留歷史季度）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.raw = pd.DataFrame({
+            "股票代码": ["LLY", "JNJ", "LLY"],
+            "股票名称": ["礼来", "强生", "礼来"],
+            "占净值比例": [10.43, 7.33, 9.0],
+            "季度": ["2026年3季度股票投资明细", "2026年3季度股票投资明细",
+                     "2026年2季度股票投资明细"],
+        })
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_writes_latest_quarter_pie_and_clean_csv(self):
+        out = plot_holdings(self.raw, "000369", self.tmp)
+
+        self.assertIsNotNone(out)
+        self.assertEqual(out.name, "000369_holdings_pie.html")
+        html = out.read_text(encoding="utf-8")
+        self.assertIn("最新季度持仓", html)
+        self.assertIn("其他（未披露）", html)   # 未披露部分要畫成一片，不能藏起來
+
+        clean = pd.read_csv(self.tmp / "000369_holdings_clean.csv", encoding="utf-8-sig")
+        self.assertEqual(list(clean["QuarterLabel"].unique()), ["2026Q3"])
+        self.assertEqual(len(clean), 2)         # 舊季度已被剔除
+        self.assertFalse((self.tmp / "000369_holdings_area.html").exists())
+
+    def test_empty_holdings_returns_none(self):
+        self.assertIsNone(plot_holdings(pd.DataFrame(), "000369", self.tmp))
 
 
 if __name__ == "__main__":

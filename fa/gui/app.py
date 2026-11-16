@@ -13,6 +13,7 @@ from tkinter import messagebox, scrolledtext, ttk
 
 from fa.gui.crash import show_error
 from fa.gui.post_market import PostMarketWindow
+from fa.gui.qdii_estimate import QdiiEstimateWindow
 from fa.pipeline import analyze_fund
 from fa.utils.logging_setup import get_logger
 from fa.viz.master import generate_master_report
@@ -47,6 +48,8 @@ class FundAnalyzerGUI:
         self._output_dir = None
         self._master_report_path = None
         self._post_market_window = None
+        self._qdii_window = None
+        self._qdii_estimate = None
 
         # 生命週期：shutdown() 之後所有 after() 定時器都不再重新排隊
         self._closed = False
@@ -124,6 +127,10 @@ class FundAnalyzerGUI:
         self.post_market_btn = ttk.Button(btns, text="盘后监控(实时预估)", 
                                           command=self.open_post_market_window, state="disabled")
         self.post_market_btn.pack(side="left", padx=(0, 6))
+
+        self.qdii_btn = ttk.Button(btns, text="QDII 淨值估算",
+                                   command=self.open_qdii_window, state="disabled")
+        self.qdii_btn.pack(side="left", padx=(0, 6))
 
         self.open_all_btn = ttk.Button(btns, text="📊 打开综合报告(视窗)",
                                         command=self.open_master_report, state="disabled")
@@ -232,6 +239,13 @@ class FundAnalyzerGUI:
                     log.debug("取消定時器失敗: %s", after_id, exc_info=True)
         self._log_poll_id = self._result_poll_id = None
 
+        if self._qdii_window is not None:
+            try:
+                self._qdii_window.close()
+            except Exception:
+                log.debug("關閉 QDII 估算窗口失敗", exc_info=True)
+            self._qdii_window = None
+
         if self._post_market_window is not None:
             try:
                 self._post_market_window.close()
@@ -308,6 +322,8 @@ class FundAnalyzerGUI:
 
         self.open_all_btn.configure(state="disabled")
         self.open_dir_btn.configure(state="disabled")
+        self.qdii_btn.configure(state="disabled")
+        self._qdii_estimate = None
         self.run_btn.configure(state="disabled")
         self.status_var.set(f"正在分析 {fund_code} ...")
         self.is_running = True
@@ -373,6 +389,11 @@ class FundAnalyzerGUI:
 
         self._output_dir = out_dir
         self.open_dir_btn.configure(state="normal")
+
+        # QDII 估算結果（非 QDII 基金為 None）
+        self._qdii_estimate = summary.get("qdii_estimate")
+        is_qdii = summary.get("analysis_mode") == "qdii"
+        self.qdii_btn.configure(state="normal" if is_qdii else "disabled")
 
         # 生成汇总报告
         master_path = generate_master_report(summary["fund_code"], out_dir)
@@ -448,6 +469,30 @@ class FundAnalyzerGUI:
 
     def _on_post_market_closed(self):
         self._post_market_window = None
+
+    def open_qdii_window(self):
+        """打開 QDII 淨值估算窗口（與分析共用同一份輸出目錄）。"""
+        if not self._output_dir or not self._output_dir.exists():
+            messagebox.showwarning("提示", "請先執行一次分析。")
+            return
+
+        existing = self._qdii_window
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        fund_code = self.code_var.get().strip()
+        if not fund_code:
+            return
+
+        self._qdii_window = QdiiEstimateWindow(
+            self.root, fund_code, self._output_dir,
+            estimate=self._qdii_estimate,
+            on_close=self._on_qdii_window_closed)
+
+    def _on_qdii_window_closed(self):
+        self._qdii_window = None
 
     def open_master_report(self):
         path = self._master_report_path

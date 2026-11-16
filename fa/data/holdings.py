@@ -7,8 +7,9 @@ import time
 
 import akshare as ak
 import pandas as pd
+import requests
 
-from fa.config import CACHE_TTL_DAYS
+from fa.config import CACHE_TTL_DAYS, REQUEST_TIMEOUT
 from fa.errors import CacheError
 from fa.utils.cache import cache_age_days, is_cache_fresh, read_cache_df, write_cache_df
 from fa.utils.dates import latest_quarter_label
@@ -20,6 +21,20 @@ log = get_logger(__name__)
 _HOLDINGS_ATTEMPTS = 3       # 每一年最多嘗試次數
 _HOLDINGS_BACKOFF = 2.0      # 第一次重試前等待秒數（之後翻倍）
 
+# 基金檔案 CDN（fundf10）故障時，首頁仍可讀到最新季度前十大持倉
+_PAGE_URL = "https://fund.eastmoney.com/{code}.html"
+_PAGE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0 Safari/537.36"),
+    "Referer": "https://fund.eastmoney.com/",
+}
+_PAGE_END_RE = re.compile(r"持仓截止日期:\s*(\d{4})-(\d{2})-(\d{2})")
+
+# 檔案接口全滅後，冷卻期內直接跳過，避免同一次分析反覆等同一台壞主機
+_ARCHIVES_COOLDOWN = 600.0
+_archives_down_until = 0.0
+
 
 def _fetch_year_holdings(fund_code: str, year: str,
                          attempts: int = _HOLDINGS_ATTEMPTS):
@@ -28,6 +43,11 @@ def _fetch_year_holdings(fund_code: str, year: str,
     eastmoney 的 CDN 偶爾會在 TLS 握手階段直接斷開（SSLEOFError），
     這類錯誤通常幾秒後就恢復，因此重試比直接放棄更有意義。
     """
+    global _archives_down_until
+    if time.monotonic() < _archives_down_until:
+        log.debug(f"[{fund_code}] 檔案接口冷卻中，跳過 {year} 年持倉")
+        return None
+
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
@@ -52,7 +72,77 @@ def _fetch_year_holdings(fund_code: str, year: str,
             time.sleep(wait)
 
     log.warning(f"[{fund_code}] {year} 年持仓获取失败（已重試 {attempts} 次）: {last_error}")
+    _archives_down_until = time.monotonic() + _ARCHIVES_COOLDOWN
     return None
+
+
+def _page_quarter_label(text: str) -> str:
+    """從首頁的「持仓截止日期」推導季度標籤。"""
+    match = _PAGE_END_RE.search(text)
+    if not match:
+        return "未註明季度"
+    year, month, _day = (int(part) for part in match.groups())
+    quarter = (month - 1) // 3 + 1
+    return f"{year}年{quarter}季度股票投资明细"
+
+
+def fetch_holdings_page(fund_code: str) -> pd.DataFrame:
+    """最新季度前十大持倉（基金首頁備援）。
+
+    檔案接口（fundf10）不可用時，``fund.eastmoney.com/<code>.html`` 仍會
+    直接輸出最新披露季度的前十大持倉表格，可用來維持分析與 QDII 估算。
+    回傳欄位與 akshare 原始資料一致（股票代码/股票名称/占净值比例/季度）。
+    """
+    url = _PAGE_URL.format(code=fund_code)
+    try:
+        resp = requests.get(url, headers=_PAGE_HEADERS, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - 備援路徑失敗就交回空資料
+        log.warning(f"[{fund_code}] 基金首頁持倉讀取失敗: {exc}")
+        return pd.DataFrame()
+
+    text = resp.content.decode("utf-8", "replace")
+    quarter = _page_quarter_label(text)
+    rows = []
+    for chunk in text.split("<tr")[1:]:
+        chunk = chunk.split("</tr>")[0]
+        code_match = re.search(r'stockcode="stock_([^"]+)"', chunk)
+        weight_match = re.search(r'<td class="alignRight bold">([\d.]+)%</td>', chunk)
+        if not (code_match and weight_match):
+            continue
+        name_match = re.search(r'title="([^"]+)"', chunk)
+        rows.append({
+            "股票代码": code_match.group(1).strip(),
+            "股票名称": name_match.group(1).strip() if name_match else "",
+            "占净值比例": float(weight_match.group(1)),
+            "季度": quarter,
+        })
+
+    if not rows:
+        log.warning(f"[{fund_code}] 基金首頁沒有持倉表格")
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(rows)
+    log.info(f"[{fund_code}] 改由基金首頁取得持倉 {len(frame)} 條（{quarter}）")
+    return frame
+
+
+def read_stale_cache(cache_path: Path, fund_code: str) -> pd.DataFrame | None:
+    """讀取任何存在（即使過期）的持倉快照；讀不到回傳 None。"""
+    path = Path(cache_path)
+    if not path.exists():
+        return None
+    try:
+        frame = read_cache_df(path)
+    except CacheError as exc:
+        log.warning(f"[{fund_code}] 舊持倉快照不可讀: {exc}")
+        return None
+    if frame is None or frame.empty:
+        return None
+    log.warning(f"[{fund_code}] 網絡不可用，改用 {cache_age_days(path):.1f} 天前的持倉快照: "
+                f"{path.name}")
+    return frame
+
 
 
 def top_holdings(df_holdings: pd.DataFrame, n: int = 10) -> pd.DataFrame:
@@ -87,9 +177,18 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True, start_date=No
         else:
             log.info(f"[{fund_code}] 持倉緩存已超過 {CACHE_TTL_DAYS} 天，重新拉取")
 
-    log.info(f"[{fund_code}] 获取历史持仓 ...")
+    log.info(f"[{fund_code}] 获取最新季度持仓 ...")
+
+    # 只輸出最新季度持倉：基金首頁一次請求就能拿到最新季度前十大，先走這條快路徑
+    page_df = fetch_holdings_page(fund_code)
+    if page_df is not None and not page_df.empty:
+        write_cache_df(page_df, cache_path)
+        log.info(f"[{fund_code}] 持仓來自主頁（最新季度前十大）→ {cache_path.name}")
+        return page_df
+
+    log.info(f"[{fund_code}] 首頁持倉不可用，改試檔案接口 ...")
     current_year = datetime.now().year
-    
+
     # 根据 start_date 决定要抓取哪几年
     if start_date:
         try:
@@ -111,6 +210,10 @@ def fetch_holdings(fund_code: str, save_dir: Path, use_cache=True, start_date=No
             all_holdings.append(df)
 
     if not all_holdings:
+        stale = read_stale_cache(cache_path, fund_code)
+        if stale is not None:
+            return stale
+
         log.warning(f"[{fund_code}] 无持仓数据")
         return pd.DataFrame()
 
