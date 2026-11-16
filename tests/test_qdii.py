@@ -33,6 +33,7 @@ from fa.analysis.valuation_dates import (
 )
 from fa.data.fund_info import resolve_fund_mode
 from fa.data.fx import rate_on
+from fa.data import holdings as holdings_data_mod
 from fa.data import qdii_holdings as qdii_holdings_mod
 from fa.data.qdii_holdings import (
     COLUMNS as HOLDING_COLUMNS,
@@ -266,7 +267,7 @@ class QdiiHoldingsTests(unittest.TestCase):
 
 
 class QdiiHoldingsFallbackTests(unittest.TestCase):
-    """基金檔案接口（fundf10）故障時，估算不能因此失去持倉。"""
+    """持倉只取最新一季：首頁優先，其次資料庫，最後本機舊快照。"""
 
     _RAW = pd.DataFrame({
         "股票代码": ["LLY", "JNJ"],
@@ -278,16 +279,16 @@ class QdiiHoldingsFallbackTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.addCleanup(setattr, qdii_holdings_mod, "_archives_down_until", 0.0)
-        qdii_holdings_mod._archives_down_until = 0.0
+        self.addCleanup(holdings_data_mod.reset_archives_cooldown)
 
-    def test_page_is_used_when_archives_fail(self):
-        with mock.patch("fa.data.qdii_holdings._fetch_year_holdings", return_value=None), \
-                mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
-                           return_value=self._RAW):
+    def test_page_is_used_when_cache_is_cold(self):
+        with mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
+                        return_value=self._RAW):
             portfolio = fetch_qdii_holdings("000369", self.tmp, use_cache=False)
 
         self.assertEqual(portfolio["source"], "eastmoney-page")
+        self.assertEqual(portfolio["holdings_scope"], "top10")
+        self.assertFalse(portfolio["history_available"])
         self.assertEqual(len(portfolio["holdings"]), 2)
         self.assertAlmostEqual(portfolio["holdings"]["weight"].iloc[0], 0.1043)
         self.assertTrue((self.tmp / "000369_qdii_holdings.csv").exists())
@@ -295,23 +296,42 @@ class QdiiHoldingsFallbackTests(unittest.TestCase):
     def test_stale_cache_is_used_when_everything_fails(self):
         write_cache_df(build_qdii_holdings(self._RAW),
                        self.tmp / "000369_qdii_holdings.csv")
-        with mock.patch("fa.data.qdii_holdings._fetch_year_holdings", return_value=None), \
-                mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
-                           return_value=pd.DataFrame()):
+        with mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
+                        return_value=pd.DataFrame()):
             portfolio = fetch_qdii_holdings("000369", self.tmp, use_cache=False)
 
         self.assertEqual(portfolio["source"], "cache-stale")
         self.assertEqual(len(portfolio["holdings"]), 2)
 
     def test_no_source_gives_empty_holdings(self):
-        with mock.patch("fa.data.qdii_holdings._fetch_year_holdings", return_value=None), \
-                mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
-                           return_value=pd.DataFrame()):
+        with mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
+                        return_value=pd.DataFrame()):
             portfolio = fetch_qdii_holdings("000369", self.tmp, use_cache=False)
 
         self.assertIsNone(portfolio["source"])
         self.assertTrue(portfolio["holdings"].empty)
         self.assertEqual(list(portfolio["holdings"].columns), HOLDING_COLUMNS)
+
+    def test_database_snapshot_is_used_when_page_fails(self):
+        """首頁抓不到時，用資料庫裡已存的持倉，而不是直接放棄。"""
+        from fa.data.database import Repository
+        from fa.data.qdii_holdings import save_quarters_to_db
+
+        with tempfile.TemporaryDirectory() as db_tmp:
+            repo = Repository(Path(db_tmp) / "test.db")
+            try:
+                save_quarters_to_db(repo, "000369", build_qdii_holdings(self._RAW),
+                                    source="eastmoney-page")
+                with mock.patch("fa.data.qdii_holdings.fetch_holdings_page",
+                                return_value=pd.DataFrame()):
+                    portfolio = fetch_qdii_holdings("000369", self.tmp,
+                                                    use_cache=False, repository=repo)
+            finally:
+                repo.close()
+
+        self.assertEqual(portfolio["source"], "database")
+        self.assertEqual(portfolio["quarter"], "2026Q3")
+        self.assertAlmostEqual(portfolio["holdings"]["weight"].iloc[0], 0.1043)
 
 
 class FundModeTests(unittest.TestCase):
@@ -376,7 +396,7 @@ class EstimateQdiiNavTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run(self, as_of=datetime(2025, 6, 10, 10, 0), holdings=None):
+    def _run(self, as_of=datetime(2025, 6, 10, 10, 0), holdings=None, repository=None):
         prices = {
             "LLY": {
                 "status": "ok", "symbol": "LLY", "currency": "USD",
@@ -395,10 +415,15 @@ class EstimateQdiiNavTests(unittest.TestCase):
         }
         fx = {"USD": pd.Series([7.00, 7.07],
                                index=pd.to_datetime(["2025-06-06", "2025-06-09"]))}
+        frame = self.holdings if holdings is None else holdings
+        quarters = (sorted({str(q) for q in frame["quarter"] if str(q).strip()})
+                    if "quarter" in frame.columns else [])
         portfolio = {
-            "holdings": self.holdings if holdings is None else holdings,
+            "holdings": frame,
+            "quarters": quarters,
             "quarter": "2025Q1", "holding_date": "2025-03-31",
             "disclosure_date": "2025-04-21", "source": "test", "cache_hit": False,
+            "holdings_scope": "top10", "history_available": False,
         }
         with mock.patch.multiple(
             "fa.analysis.nav_estimator",
@@ -409,7 +434,8 @@ class EstimateQdiiNavTests(unittest.TestCase):
             m["fetch_qdii_holdings"].return_value = portfolio
             m["fetch_holding_prices"].return_value = prices
             m["fetch_fx_rates"].return_value = fx
-            return estimate_qdii_nav("000369", self.save, as_of=as_of)
+            return estimate_qdii_nav("000369", self.save, as_of=as_of,
+                                     repository=repository)
 
     def test_estimated_nav_matches_hand_calculation(self):
         record = self._run()
@@ -446,6 +472,94 @@ class EstimateQdiiNavTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history.iloc[0]["target_nav_date"], "2025-06-09")
 
+    def test_estimate_is_persisted_to_database(self):
+        from fa.data.database import Repository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repository(Path(tmp) / "test.db")
+            try:
+                record = self._run(repository=repo)
+                runs = repo.list_estimations("000369")
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(runs[0]["status"], "partial")
+                self.assertEqual(runs[0]["target_nav_date"], record["target_nav_date"])
+                inputs = repo.estimation_inputs(runs[0]["run_id"])
+                self.assertEqual(inputs["estimated_nav"], record["estimated_nav"])
+                self.assertEqual(repo.nav_on_or_before("000369", date(2025, 6, 10))[1], 1.25)
+            finally:
+                repo.close()
+
+    def test_holdings_frame_roundtrips_through_the_database(self):
+        from fa.data.database import Repository
+        from fa.data.qdii_holdings import load_quarters_from_db, save_quarters_to_db
+
+        raw = pd.DataFrame({
+            "股票代码": ["LLY", "JNJ", "LLY"],
+            "股票名称": ["礼来", "强生", "礼来"],
+            "占净值比例": [10.43, 7.33, 9.11],
+            "季度": ["2026年2季度股票投资明细", "2026年2季度股票投资明细",
+                     "2026年3季度股票投资明细"],
+        })
+        frame = build_qdii_holdings(raw, keep_all=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repository(Path(tmp) / "test.db")
+            try:
+                self.assertEqual(save_quarters_to_db(repo, "000369", frame), 2)
+                back = load_quarters_from_db(repo, "000369")
+            finally:
+                repo.close()
+
+        self.assertEqual(sorted(back["quarter"].unique()), ["2026Q2", "2026Q3"])
+        self.assertAlmostEqual(
+            float(back.loc[back["ticker"] == "JNJ", "weight"].iloc[0]), 0.0733)
+
+    def test_saved_snapshot_records_the_real_source(self):
+        """首頁 fallback 的資料不可被記成 eastmoney-archives。"""
+        from fa.data.database import Repository
+        from fa.data.qdii_holdings import save_quarters_to_db
+
+        raw = pd.DataFrame({
+            "股票代码": ["LLY"],
+            "股票名称": ["礼来"],
+            "占净值比例": [10.43],
+            "季度": ["2026年3季度股票投资明细"],
+        })
+        frame = build_qdii_holdings(raw, keep_all=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repository(Path(tmp) / "test.db")
+            try:
+                save_quarters_to_db(repo, "000369", frame, source="eastmoney-page")
+                snapshots = repo.load_snapshots("000369")
+            finally:
+                repo.close()
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].source, "eastmoney-page")
+
+    def test_save_defaults_to_archives_source(self):
+        from fa.data.database import Repository
+        from fa.data.qdii_holdings import save_quarters_to_db
+
+        raw = pd.DataFrame({
+            "股票代码": ["LLY"],
+            "股票名称": ["礼来"],
+            "占净值比例": [10.43],
+            "季度": ["2026年3季度股票投资明细"],
+        })
+        frame = build_qdii_holdings(raw, keep_all=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repository(Path(tmp) / "test.db")
+            try:
+                save_quarters_to_db(repo, "000369", frame)
+                snapshots = repo.load_snapshots("000369")
+            finally:
+                repo.close()
+
+        self.assertEqual(snapshots[0].source, "eastmoney-archives")
+
     def test_repeat_run_for_same_target_replaces_history_row(self):
         self._run()
         self._run()
@@ -469,6 +583,24 @@ class EstimateQdiiNavTests(unittest.TestCase):
                      "quarter", "holding_date", "disclosure_date"]))
         self.assertEqual(record["status"], "insufficient-data")
         self.assertIsNone(record.get("estimated_nav"))
+
+    def test_missing_history_is_insufficient_data(self):
+        """本機只有比目標日更新的季度 → 不估值，也不再嘗試下載歷史。"""
+        future = self.holdings.assign(quarter="2026Q3",
+                                      holding_date="2026-09-30",
+                                      disclosure_date="2026-10-21")
+        record = self._run(holdings=future)
+
+        self.assertEqual(record["status"], "insufficient-data")
+        self.assertIn("歷史快照", record["message"])
+        self.assertEqual(record["holdings"], [])
+
+    def test_record_reports_scope_and_history(self):
+        record = self._run()
+
+        self.assertEqual(record["holdings_scope"], "top10")
+        self.assertFalse(record["history_available"])
+        self.assertTrue(any("前十大" in note for note in record["warnings"]))
 
     def test_missing_nav_file_and_no_download(self):
         (self.save / "000369_daily_nav.csv").unlink()
@@ -640,6 +772,65 @@ class V1CorrectionTests(unittest.TestCase):
             self.assertEqual(set(payload["snapshots"]), {"2025-06-09", "2025-06-10"})
             self.assertAlmostEqual(
                 payload["snapshots"]["2025-06-10"]["estimated_nav"], 1.2)
+
+
+class PointInTimeTests(unittest.TestCase):
+    """不同估值日只能看到當天已經披露的最新季度（前視偏差防線）。"""
+
+    @staticmethod
+    def _raw(*labels):
+        rows = []
+        for index, label in enumerate(labels):
+            rows.append({"股票代码": f"T{index}", "股票名称": f"公司{index}",
+                         "占净值比例": 20.0 - index, "季度": label})
+        return pd.DataFrame(rows)
+
+    def test_point_in_time_uses_only_then_disclosed_quarter(self):
+        labels = ["2025年4季度股票投资明细", "2026年1季度股票投资明细",
+                  "2026年2季度股票投资明细", "2026年3季度股票投资明细"]
+        frame = build_qdii_holdings(self._raw(*labels), keep_all=True)
+
+        # 2026-05-20：2026Q1 已披露（04-21），2026Q2 尚未（07-21）
+        selection = select_point_in_time(frame, date(2026, 5, 20))
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["quarter"], "2026Q1")
+
+        # 2026-11-01：2026Q3 已披露（10-21）
+        selection = select_point_in_time(frame, date(2026, 11, 1))
+        self.assertEqual(selection["quarter"], "2026Q3")
+
+        # 2026-01-15：2025Q4 的推算披露日是 2026-01-21，尚未公開 → 無可用季度
+        self.assertIsNone(select_point_in_time(frame, date(2026, 1, 15)))
+        # 2026-02-01：2025Q4 已披露（01-21）
+        selection = select_point_in_time(frame, date(2026, 2, 1))
+        self.assertEqual(selection["quarter"], "2025Q4")
+
+    def test_repository_point_in_time_matches(self):
+        from fa.data.database import Repository
+        from fa.models.holding import snapshot_from_rows
+
+        labels = {"2025Q4": "2025-12-31", "2026Q1": "2026-03-31",
+                  "2026Q2": "2026-06-30", "2026Q3": "2026-09-30"}
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repository(Path(tmp) / "test.db")
+            try:
+                for quarter, day in labels.items():
+                    snapshot = snapshot_from_rows(
+                        "000369",
+                        [{"ticker": "LLY", "name": "礼来", "weight": 0.5,
+                          "currency": "USD", "market": "US"}],
+                        quarter=quarter, holding_date=date.fromisoformat(day),
+                        disclosure_date=date.fromisoformat(day),
+                    )
+                    repo.save_snapshot(snapshot)
+
+                self.assertEqual(
+                    repo.snapshot_as_of("000369", date(2026, 5, 20)).quarter, "2026Q1")
+                self.assertEqual(
+                    repo.snapshot_as_of("000369", date(2026, 11, 1)).quarter, "2026Q3")
+                self.assertIsNone(repo.snapshot_as_of("000369", date(2025, 1, 1)))
+            finally:
+                repo.close()
 
 
 if __name__ == "__main__":

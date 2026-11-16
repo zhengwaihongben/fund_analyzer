@@ -94,6 +94,12 @@ def _print_qdii_summary(fund_code: str, estimate: dict) -> None:
     print(f"  持倉披露        : {estimate.get('holdings_quarter')}"
           f"（{estimate.get('holdings_date')}，披露日 {disclosure_date}，"
           f"僅用目標日已披露季度）")
+    scope = {"top10": "前十大（揭露口徑）",
+             "full_portfolio": "完整組合"}.get(
+                 estimate.get("holdings_scope"), estimate.get("holdings_scope") or "--")
+    quarters = estimate.get("quarters_available") or []
+    print(f"  持倉範圍        : {scope}，來源 {estimate.get('holdings_source')}"
+          f"，本機季度 {len(quarters)} 個（{'、'.join(quarters) or '--'}）")
     if estimate.get("warnings"):
         for warning in estimate["warnings"]:
             print(f"  ⚠ {warning}")

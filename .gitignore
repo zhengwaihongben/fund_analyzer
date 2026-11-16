@@ -35,3 +35,12 @@ desktop.ini
 
 # 沙箱測試殘留目錄（無法刪除時忽略）
 _tmp/
+
+# V2 資料目錄（資料庫與匯出屬產出物，不入版控）
+data/database/*.db
+data/database/*.db-wal
+data/database/*.db-shm
+data/cache/*
+data/exports/*/*.csv
+data/exports/*/*.json
+data/exports/*/*.xlsx

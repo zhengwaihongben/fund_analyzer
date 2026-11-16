@@ -18,7 +18,15 @@ from fa.utils.cache import (
     write_cache_df,
 )
 from fa.utils.dates import latest_quarter_label
-from fa.utils.net import apply_default_timeout
+from fa.utils.net import (
+    NETWORK_CONNECTION,
+    NETWORK_DNS,
+    NETWORK_TIMEOUT,
+    NETWORK_TLS,
+    apply_default_timeout,
+    classify_network_error,
+    describe_network_error,
+)
 from fa.utils.tickers import to_yf_ticker
 
 
@@ -143,6 +151,61 @@ class NetworkDefaultTimeoutTests(unittest.TestCase):
 
         apply_default_timeout(0)
         self.assertIsNone(socket.getdefaulttimeout())
+
+
+class NetworkErrorClassificationTests(unittest.TestCase):
+    """網絡故障要能被歸類，log 才寫得出「這是網絡不是程式」的結論。"""
+
+    def test_ssl_eof_is_tls(self):
+        import ssl
+
+        exc = ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+        self.assertEqual(classify_network_error(exc), NETWORK_TLS)
+        self.assertIn("TLS", describe_network_error(exc))
+
+    def test_requests_ssl_error_is_tls(self):
+        from requests.exceptions import SSLError
+
+        exc = SSLError("Max retries exceeded (Caused by SSLError(SSLEOFError(8, ...)))")
+        self.assertEqual(classify_network_error(exc), NETWORK_TLS)
+
+    def test_timeout_is_timeout(self):
+        self.assertEqual(classify_network_error(socket.timeout("timed out")), NETWORK_TIMEOUT)
+
+    def test_dns_error(self):
+        self.assertEqual(classify_network_error(socket.gaierror(11001, "getaddrinfo failed")), NETWORK_DNS)
+
+    def test_connection_error(self):
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+
+        exc = RequestsConnectionError("Connection aborted.")
+        self.assertEqual(classify_network_error(exc), NETWORK_CONNECTION)
+
+    def test_message_based_fallback(self):
+        exc = RuntimeError("Caused by SSLError(SSLError(1, '[SSL: WRONG_VERSION_NUMBER] wrong version number'))")
+        self.assertEqual(classify_network_error(exc), NETWORK_TLS)
+
+    def test_wrapped_exception_chain_is_unwrapped(self):
+        """akshare 的 APIError(x) from SSLError 要能歸類成 TLS，而不是『其他』。"""
+        import ssl
+
+        from requests.exceptions import SSLError
+
+        class APIError(Exception):
+            pass
+
+        try:
+            try:
+                raise SSLError("(Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol')))")
+            except SSLError as err:
+                raise APIError(f"FundArchivesDatas request failed: {err}") from err
+        except APIError as wrapped:
+            self.assertEqual(classify_network_error(wrapped), NETWORK_TLS)
+            self.assertIn("TLS", describe_network_error(wrapped))
+        self.assertIsInstance(ssl.SSLEOFError(8, "x"), ssl.SSLError)
+
+    def test_unknown_error_is_other(self):
+        self.assertEqual(classify_network_error(ValueError("boom")), "other")
 
 
 if __name__ == "__main__":

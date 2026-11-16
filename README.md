@@ -22,7 +22,7 @@ I currently invest the funds by Alipay(支付宝), but most funds on it do not p
 - **Risk Metrics** — Annualised return & volatility, Sharpe, Sortino, Calmar, Information Ratio, Tracking Error, Max Drawdown, AUM
 - **Cumulative Excess Return** — Fund performance vs a user-selected benchmark, aligned on common trading days
 - **Post-Market Estimate** — US pre/post-market prices of the latest disclosed top-10 holdings, with an explicit **coverage ratio** and each holding's contribution to the fund NAV
-- **QDII NAV Estimate (V1)** — Estimates the fund's missing latest NAV from the portfolio that was already public before the target day, the overseas closes and the FX move, reporting coverage, uncovered weight, per-holding and local/FX attribution, and a separate estimated-NAV record (with a replayable input snapshot) instead of overwriting the official series
+- **QDII NAV Estimate (V2)** — Estimates the fund's missing latest NAV from the portfolio that was already public before the target day, the overseas closes and the FX move, reporting coverage, uncovered weight, per-holding returns, Shapley local/FX attribution and a data-quality grade, plus a separate estimated-NAV record (with a replayable input snapshot) instead of overwriting the official series
 - **China trading calendar** — Beijing-timezone 15:00 cutoff plus the 2025–2026 statutory holiday table, so valuation dates follow the real trading calendar instead of `today − 1 day`
 - **Start Date Filter** — Limit the tracking range to a specific start date
 - **Multi-Market Benchmark** — Support US / CN / HK indices with auto-detection
@@ -62,8 +62,11 @@ fund_analyzer/
 │   │   ├── technical.py        # SMA / BOLL / RSI / MACD + NAV-based KDJ and volatility proxies
 │   │   ├── risk.py             # annualised return & vol, Sharpe, Sortino, Calmar, IR/TE, MaxDD
 │   │   ├── valuation_dates.py  # trade date → target/base NAV date alignment (15:00 cut-off)
-│   │   ├── portfolio_return.py # per-holding return, staleness rules, coverage-weighted aggregate
-│   │   ├── nav_estimator.py    # QDII V1 weighted-holdings estimate + record persistence
+│   │   ├── price_alignment.py  # last observation on/before a date + staleness verdict
+│   │   ├── returns/            # V2 return calculators: equity, ETF, bond ETF, cash, FX
+│   │   ├── valuation/          # V2 portfolio valuation: weights, coverage, Shapley attribution
+│   │   ├── portfolio_return.py # V1 per-holding return (kept for the legacy pipeline)
+│   │   ├── nav_estimator.py    # QDII orchestrator: dates → prices → FX → calculators → portfolio → DB/JSON
 │   │   ├── estimation_backtest.py  # reconcile estimates with official NAV → MAE / RMSE / bias
 │   │   └── post_market.py      # US pre/post-market estimate with coverage ratio and contribution
 │   ├── viz/
@@ -86,7 +89,15 @@ fund_analyzer/
 │   ├── test_utils.py           # config merging, quarters, tickers, cache TTL, socket timeout
 │   ├── test_data.py            # pingzhongdata parsing, holdings retry/backoff
 │   ├── test_analysis.py        # indicators (incl. warm-up), downside deviation, Sortino, IR alignment
+│   ├── test_models.py          # V2 dataclasses: asset, holding, prices, return results, quality
+│   ├── test_calendars.py       # CN/US/HK/JP sessions, holidays, DST, staleness
+│   ├── test_database.py        # SQLite migration, repository round-trips, point-in-time
+│   ├── test_price_alignment.py # last-observation rule and the four staleness bands
+│   ├── test_return_calculators.py  # equity / ETF / bond ETF / cash / FX + registry
+│   ├── test_portfolio_valuation.py # weights, coverage, uncovered, status
+│   ├── test_shapley.py         # local + FX == CNY contribution, portfolio identity
 │   ├── test_qdii.py            # calendar, valuation dates, holding returns, FX, estimator, backtest
+│   ├── test_nav_estimator_v2.py    # orchestrated flow end-to-end, no network, DB persistence
 │   ├── test_pipeline.py        # end-to-end pipeline with network calls stubbed
 │   └── test_gui.py             # log queue, crash handler, shutdown(), post-market window reuse
 ├── install.bat / install.sh    # create .venv and install requirements
@@ -120,7 +131,7 @@ Files created at runtime (not in git):
 
 - Python 3.10 or newer
 - Internet connection (AKShare / 天天基金网 for NAV and holdings, Yahoo Finance for macro factors and post-market prices)
-- Python packages from `requirements.txt`: `akshare`, `pandas`, `numpy`, `plotly`, `requests`, `yfinance` (the last one is required by `yf_helper.py` for the post-market estimate)
+- Python packages from `requirements.txt`: `akshare`, `pandas`, `numpy`, `plotly`, `requests`, `yfinance` (the last one is required by `yf_helper.py` for the post-market estimate). AKShare is pinned to the `1.18.x` line (`>=1.18.88,<1.19.0`) because its fund holdings archive interface has changed behaviour between minor releases; 1.18.88 (Python 3.10) and 1.18.97 (conda `quant-finance`) are the versions this project was verified against.
 - Works on Windows / macOS / Linux
 - Optional: `pywebview` — used to show the combined report in an embedded window; without it the report opens in the default browser
 
@@ -246,7 +257,7 @@ output/017436/
 ├── 017436_excess_return.html          # Cumulative excess return vs benchmark
 ├── 017436_summary.json                # Summary: success flag, metrics, file list
 ├── 017436_master_report.html          # Combined report (generated by the GUI only)
-├── 017436_qdii_holdings.csv           # QDII portfolio record (weights + quarter/holding/disclosure dates)
+├── 017436_qdii_holdings.csv           # QDII portfolio record (latest quarter, weights + dates)
 ├── 017436_qdii_estimate.json          # Latest QDII NAV estimate, with every input it used
 ├── 017436_qdii_estimate_inputs.json   # Full input snapshot per target date (prices, FX, dates) for replay
 └── 017436_qdii_estimates.csv          # One row per estimate, later reconciled with the official NAV
@@ -314,7 +325,7 @@ Charts and column names label these proxies explicitly, so a proxy is never mist
 
 The GUI shows the coverage ratio and the contribution, so a 40 %-coverage estimate is never presented as a whole-fund estimate. A previous analysis run is required, because the estimate reads `<fund_code>_holdings_clean.csv`.
 
-## QDII NAV Estimate (V1)
+## QDII NAV Estimate (V2)
 
 A QDII fund bought before 15:00 Beijing time on day **T** is settled at the overseas close of **T−1**; that official NAV is published on T+1. When you analyse the fund on day T, the latest NAV you can see is therefore **T−2**. The estimator fills that one-day gap:
 
@@ -337,17 +348,21 @@ The trade date is resolved in **Asia/Shanghai**: before 15:00 the trade date is 
 | `coverage_ratio` | Σ weights of holdings whose price **and** FX were obtained — a fraction of the whole fund |
 | `coverage_of_known` | The same sum divided by the disclosed weights (i.e. coverage of the known portfolio) |
 | `uncovered_weight` | `1 − coverage_ratio`: the share treated as a 0 % return, reported explicitly because it is unknown, not zero |
-| `local_contribution` / `fx_contribution` / `interaction_contribution` | Attribution of the estimate; the three add up to `estimated_return` exactly (`r_cny = (1+r_local)(1+r_fx) − 1`) |
+| `local_contribution` / `fx_contribution` | Shapley attribution of the estimate: `C_local = w·r_local(1+r_fx/2)`, `C_fx = w·r_fx(1+r_local/2)`; the two add up to `estimated_return` exactly |
 | `holdings_quarter` / `holdings_date` / `disclosure_date` / `disclosure_date_estimated` | The quarter actually used, its quarter end, the filing date assumed for it (quarter end + 21 days, marked as **estimated** rather than fact) |
-| `look_ahead_safe` / `quarters_available` | The estimate only used a portfolio disclosed on or before the target date; the quarters the data source offered |
-| `holdings_source` | Where the weights came from: `eastmoney-archives` (quarterly archive API), `eastmoney-page` (latest quarter top-10 from the fund home page), `cache` (fresh snapshot) or `cache-stale` (older snapshot reused because every online source failed) |
+| `look_ahead_safe` / `quarters_available` | The estimate only used a portfolio disclosed on or before the target date; the quarters that exist locally (cache + database) |
+| `holdings_source` | Where the weights came from: `eastmoney-page` (latest quarter top-10 from the fund home page), `database` (SQLite snapshot), `cache` (fresh snapshot) or `cache-stale` (older snapshot reused because every online source failed) |
+| `holdings_scope` | `top10` (Eastmoney publishes only the top ten, the normal case) or `full_portfolio` |
+| `history_available` | Whether more than one quarter exists locally, i.e. whether a date-specific estimate has anything older to fall back on |
 | `market_data_date` | Latest date actually present in the price data |
-| `holdings[]` | Per holding: weight, currency, local return, FX return, CNY return, contribution, price/FX dates, status |
+| `holdings[]` | Per holding: weight, currency, market, local return, FX return, CNY return, **Shapley** contribution, price/FX dates, status, notes |
+| `model_version` | `2.2.0` — the V2 estimation model that produced the record |
+| `data_quality` / `quality_score` | `high` (≥85) / `medium` (≥60) / `low` and the 0–100 score: stale prices, excluded weight, low coverage and an estimated disclosure date each cost points |
 | `warnings[]` | Missing prices, stale data, stale portfolio, uncovered weight, etc. |
 
 Rules the implementation follows:
 
-- **No look-ahead bias.** Only quarters whose disclosure date is on or before the target date may be used (`fa/data/qdii_holdings.py::select_point_in_time`); if the newest snapshot is too new, the historical archive is fetched instead, and if no quarter qualifies the estimate is refused (`insufficient-data`) rather than computed from future information.
+- **No look-ahead bias.** Only quarters whose disclosure date is on or before the target date may be used (`fa/data/qdii_holdings.py::select_point_in_time`); if no locally available quarter qualifies the estimate is refused (`insufficient-data`) rather than computed from future information. The tool does **not** download historical quarters automatically any more — older quarters have to come from SQLite (imported or saved by earlier runs).
 - **No fabricated data.** A holding without a usable price or FX rate is excluded from both the return and the coverage ratio (status `missing-price`, `missing-target-price`, `missing-base-price`, `stale-price`, `stale-base-price`, `missing-fx`, `stale-fx`, `stale-base-fx`, `missing-currency`); it is never treated as a 0 % return.
 - **Both endpoints of the interval must be fresh.** Staleness is checked on the target **and** the base observation, for prices and for FX, so a base quote from three weeks ago cannot be silently compared with a NAV two days ago.
 - **Unknown currency is not CNY.** An empty/unrecognised currency yields `missing-currency` and is excluded; only `CNY`/`RMB` skip the FX leg.
@@ -363,18 +378,18 @@ python fund_analyzer.py 000369 --qdii-backtest
 
 An estimate whose target date has no published NAV yet is counted as `pending`, not as an error.
 
-**Where the portfolio comes from.** The holdings are resolved with a fallback chain, so a single broken endpoint no longer empties the estimate:
+**Where the portfolio comes from.** The QDII portfolio is **latest-quarter only, by design**: the Eastmoney archive endpoint that serves older quarters is unreachable from many networks, and waiting for it turned one bad afternoon into a permanently "missing history" state. The estimator only needs the newest public portfolio, so the chain is:
 
 1. a fresh `<fund_code>_qdii_holdings.csv` snapshot (unless caching was disabled);
-2. the quarterly archive API (`fundf10.eastmoney.com`, the historical source), asked for **every** recent quarter because the estimator needs the one disclosed before the target date;
-3. the fund home page (`fund.eastmoney.com/<code>.html`), which renders the **latest disclosed quarter's top 10** with weights — one request, no history, reported as `holdings_source: "eastmoney-page"`;
+2. the fund home page (`fund.eastmoney.com/<code>.html`), which renders the **latest disclosed quarter's top 10** with weights — one request, reported as `holdings_source: "eastmoney-page"` and `holdings_scope: "top10"`;
+3. the SQLite database (`data/database/fund_analyzer.db`, `holdings_source: "database"`), when the network is down but an earlier run already stored a snapshot;
 4. the last snapshot on disk, flagged `holdings_source: "cache-stale"` and mentioned in `warnings[]`.
 
-The archive host is put on a 10-minute cooldown when it starts failing, so one analysis attempt does not wait on the same broken server twice (the generic holdings step and the QDII step share the cooldown).
+Every fetched quarter is merged into the local CSV cache and written to SQLite, so older quarters accumulate locally and remain available to `select_point_in_time`; they are simply never downloaded from the archive API any more. When the page fetch fails, the request is not retried in a loop — the database and the on-disk snapshot are tried instead.
 
 **Fund classification.** `--fund-type auto` (default) reads the fund's formal type where the data source exposes it, falls back to the fund name, and otherwise stays `standard` without guessing; `--fund-type qdii` forces the estimate, `--fund-type standard` disables it. A standard fund simply skips the whole QDII block.
 
-**V1 limitations:** the holiday table covers 2025–2026 only (other years fall back to weekends, with a warning); `Adjusted Close` is used as the price proxy (dividends/splits are handled, fees are not); bonds, cash and funds held inside the portfolio are counted as uncovered weight; the disclosed filing date is an estimate (quarter end + 21 days), not the statutory publication date; the estimator supports stocks, ETFs and cash only.
+**V2 limitations:** the holiday table covers 2025–2026 only (other years fall back to weekends, with a warning); `Adjusted Close` is used as the price proxy (dividends/splits are handled, fees are not); bonds, cash and funds held inside the portfolio are counted as uncovered weight; the disclosed filing date is an estimate (quarter end + 21 days), not the statutory publication date; the estimator supports stocks, ETFs and cash only.
 
 ## Settings & Logs
 
@@ -385,6 +400,10 @@ The archive host is put on a 10-minute cooldown when it starts failing, so one a
 | `FA_CACHE_TTL_DAYS` | `7` | Holdings cache lifetime in days (`<= 0` = never expire) |
 | `FA_REQUEST_TIMEOUT` | `30` | Socket default timeout in seconds; third-party HTTP libraries expose no timeout, so this bounds hung connections |
 | `FA_LOG_FILE` | `fund_analyzer.log` | Log file path |
+| `FA_STALE_SESSIONS_WARN` | `0` | Stale sessions above this value are flagged (0 = flag any staleness) |
+| `FA_STALE_SESSIONS_EXCLUDE` | `3` | Stale sessions at/above this value are excluded from the return and coverage |
+| `FA_STALE_SESSIONS_MAX` | `10` | Absolute cap: beyond it the quote counts as missing, not stale |
+| `FA_CASH_ASSUMPTION_RATE` | `0.0` | Annual rate used when a cash holding declares none (warning is emitted) |
 
 ### Log files
 
@@ -403,8 +422,22 @@ All `*.log` files are git-ignored.
 - NAV history is re-fetched on every run. It is read from the `pingzhongdata` JSON blob on `fund.eastmoney.com` and parsed with `re` + `json`; if that fails, the tool falls back to AKShare's `fund_open_fund_info_em`. Avoiding the AKShare path by default keeps the V8 isolate (`py_mini_racer`) out of the process, which is both faster and safer in the GUI's worker thread.
 - Holdings are **latest-quarter only**. The fund home page (`https://fund.eastmoney.com/<code>.html`) is tried first, because one request already contains the latest disclosed quarter's top 10; only if that fails does the tool fall back to the per-year archive API (current year and the previous three, each attempted up to 3 times with a 2 s / 4 s backoff, then a 10-minute host cooldown) and finally to any older snapshot on disk. No historical quarter series is kept: `<fund_code>_holdings_clean.csv` holds the latest quarter only, and the chart is a donut of the top 10 plus one `其他（未披露）` slice for the rest of the fund — the undisclosed part is never renormalised away.
 - `<fund_code>_holdings_raw.csv` is the holdings cache. A run reuses it when it is younger than `FA_CACHE_TTL_DAYS` and `use_cache` is true (`--no-cache` or unchecking the GUI box forces a refresh). A corrupt cache raises `CacheError`, is logged and re-downloaded instead of aborting. Disabling the cache only skips the *fresh* snapshot: if every online source fails, an older snapshot is still used and logged, because throwing good data away helps nobody.
-- `<fund_code>_qdii_holdings.csv` is the QDII portfolio cache (same TTL rule). It stores weights plus the quarter, holding and disclosure dates, so the estimator can reuse a portfolio without re-deriving its dates.
-- Outputs are pruned only after a successful run: derived HTML/CSV/JSON files that this run did not produce are removed, while raw/cache files (`*_daily_nav.csv`, `*_holdings_raw.csv`, `*_holdings_clean.csv`) and unrelated files are kept.
+- `<fund_code>_qdii_holdings.csv` is the QDII portfolio cache (same TTL rule). It stores weights plus the quarter, holding and disclosure dates, so the estimator can reuse a portfolio without re-deriving its dates. A refresh merges the new quarter into this file instead of replacing older ones, so locally accumulated history survives.
+- Outputs are pruned only after a successful run: derived HTML/CSV/JSON files that this run did not produce are removed, while raw/cache files (`*_daily_nav.csv`, `*_holdings_raw.csv`, `*_holdings_clean.csv`, `*_qdii_holdings.csv`, `*_qdii_estimates.csv`) and unrelated files are kept.
+
+## Database (SQLite)
+
+V2 keeps a local SQLite database at `data/database/fund_analyzer.db` (override with `cfg["db_path"]`, git-ignored). It is the durable version of what the JSON/CSV files hold:
+
+| Table | Contents |
+| :--- | :--- |
+| `funds`, `assets` | Fund metadata and the asset universe (ticker, type, market, currency) |
+| `holdings_snapshots`, `holdings` | Every fetched quarter, with holding and disclosure dates, queryable point-in-time |
+| `market_prices`, `fx_rates`, `official_nav` | Prices, FX rates and the official NAV series |
+| `estimation_runs`, `estimation_inputs`, `estimation_results` | One immutable row set per estimate: the run metadata, the full input payload and the result — never overwritten |
+| `backtest_results` | Error metrics per run/group |
+
+The QDII pipeline uses it in both directions: each fetched quarter is written on the way in (so a later run can rebuild point-in-time holdings offline, reported as `holdings_source: "database"`), and every estimate is stored with its `run_id` on the way out. If the database cannot be opened the analysis still runs from files only — the database is a durability layer, not a dependency.
 
 ## Tests
 
@@ -414,7 +447,7 @@ The suite uses the standard library only (`unittest`, no `pytest` needed):
 python -m unittest discover -s tests -t .
 ```
 
-Currently 113 tests. Coverage by file: `test_utils.py` — config merging, quarter labelling, ticker normalisation, cache TTL/pruning, socket timeout; `test_data.py` — `pingzhongdata` NAV parsing, holdings retry/backoff, fund-home-page holdings parsing and the page/stale-snapshot fallbacks; `test_analysis.py` — indicators (warm-up and the absence of ATR/ADX), downside deviation / Sortino against hand-computed values, IR alignment on common dates; `test_qdii.py` — China calendar and 15:00 cutoff, valuation-date resolution, point-in-time portfolio selection, per-holding returns with target/base staleness, unknown-currency rejection, coverage aggregation and local/FX/interaction attribution, Yahoo symbol/currency mapping, FX series, portfolio fallback order, the estimator and its input snapshot, and the backtest metrics; `test_pipeline.py` — the end-to-end pipeline with network calls stubbed, cache survival, output pruning, error path, QDII estimate wiring; `test_gui.py` — log queue, crash handler, `shutdown()`, post-market window reuse and close.
+Currently 266 tests. Coverage by file: `test_utils.py` — config merging, quarter labelling, ticker normalisation, cache TTL/pruning, socket timeout; `test_data.py` — `pingzhongdata` NAV parsing, holdings retry/backoff, fund-home-page holdings parsing and the page/stale-snapshot fallbacks; `test_analysis.py` — indicators (warm-up and the absence of ATR/ADX), downside deviation / Sortino against hand-computed values, IR alignment on common dates; `test_qdii.py` — China calendar and 15:00 cutoff, valuation-date resolution, point-in-time portfolio selection, per-holding returns with target/base staleness, unknown-currency rejection, coverage aggregation and local/FX/interaction attribution, Yahoo symbol/currency mapping, FX series, portfolio fallback order, the estimator and its input snapshot, and the backtest metrics; `test_pipeline.py` — the end-to-end pipeline with network calls stubbed, cache survival, output pruning, error path, QDII estimate wiring; `test_gui.py` — log queue, crash handler, `shutdown()`, post-market window reuse and close.
 
 ## Troubleshooting
 
@@ -425,6 +458,14 @@ SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING]'))
 ```
 
 This is a temporary network issue with the data source (Eastmoney, usually the `fundf10` CDN). Because only the latest quarter is needed, the fund home page's top 10 is tried first and normally succeeds in one request; if it fails too, the per-year archive API is retried up to 3 times per year with backoff, and the last snapshot on disk is used as a final fallback, so the run still produces charts and — for a QDII fund — a NAV estimate. If it keeps failing, wait a few minutes, change network, or check the proxy.
+
+Since V2.1 the failure is classified before it is logged, so the message tells you which layer broke:
+
+```
+[000369] 2026 年持仓获取失败（已重試 3 次）: TLS 握手階段被中斷（網絡路徑 / 中間設備 / 對端 CDN 問題，非程式錯誤）（APIError）
+```
+
+Categories: TLS handshake interrupted, connection closed by peer, timeout, DNS failure, other. If it says TLS, the request never reached Eastmoney — a quick manual check (print the proxy environment, resolve the host, try a raw TLS handshake, then plain `requests` with and without the environment proxy) tells a local proxy/TLS problem from a server-side one. Do not add retries before that check: retrying a broken TLS path just adds ~50 s to every run. Note also that the archive host (`fundf10.eastmoney.com`) is the only source of per-quarter history, which is why the QDII flow no longer depends on it — see "Where the portfolio comes from".
 
 The QDII estimate reports `status: "insufficient-data"` and the CLI prints `未產生估算：目標日 … 之前尚無已披露的 QDII 持倉` in two cases: **every** portfolio source failed (no archive, no reachable home page, no snapshot), or the only snapshots on disk were disclosed **after** the target date (look-ahead protection — the estimator refuses to use future information). That is deliberate, because an estimate without an admissible portfolio would be fabricated.
 

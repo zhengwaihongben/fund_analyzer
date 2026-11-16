@@ -26,6 +26,7 @@ DATA_FILE_SUFFIXES = (
     "_holdings_clean.csv",
     "_qdii_holdings.csv",
     "_qdii_estimates.csv",
+    "_qdii_estimate_inputs.json",
 )
 
 

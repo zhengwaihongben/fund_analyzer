@@ -20,6 +20,19 @@ from fa.viz.charts import plot_excess_return, plot_holdings, plot_risk_metrics, 
 
 log = get_logger(__name__)
 
+def _open_repository(cfg: dict):
+    """Best-effort SQLite handle; estimation works without a database."""
+    if not cfg.get("store_db", True):
+        return None
+    try:
+        from fa.data.database import Repository
+
+        return Repository(cfg.get("db_path"))
+    except Exception as exc:  # noqa: BLE001 - 資料庫不可用時退回純檔案流程
+        log.warning(f"資料庫不可用，改用純檔案模式: {exc}")
+        return None
+
+
 def analyze_fund(fund_code: str, base_output: Path = Path("output"),
                  cfg: dict = None, show: bool = False,
                  use_cache: bool = True) -> dict:
@@ -94,17 +107,22 @@ def analyze_fund(fund_code: str, base_output: Path = Path("output"),
     summary["fund_profile"] = fund_profile
     summary["analysis_mode"] = fund_mode
     if fund_mode == "qdii":
+        repository = _open_repository(cfg)
         try:
             qdii_estimate = estimate_qdii_nav(
                 fund_code, save_dir,
                 cfg={**cfg, "fund_name": fund_profile.get("name")},
                 as_of=cfg.get("qdii_as_of"),
                 use_cache=use_cache,
+                repository=repository,
             )
         except Exception as exc:  # noqa: BLE001 - 估算失敗不應讓整份分析失敗
             log.exception(f"[{fund_code}] QDII 淨值估算失敗")
             qdii_estimate = {"status": "error", "fund_code": fund_code,
                              "message": str(exc), "holdings": []}
+        finally:
+            if repository is not None:
+                repository.close()
     summary["qdii_estimate"] = qdii_estimate
 
     # 保存汇总

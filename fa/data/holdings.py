@@ -14,6 +14,7 @@ from fa.errors import CacheError
 from fa.utils.cache import cache_age_days, is_cache_fresh, read_cache_df, write_cache_df
 from fa.utils.dates import latest_quarter_label
 from fa.utils.logging_setup import get_logger
+from fa.utils.net import describe_network_error
 
 
 log = get_logger(__name__)
@@ -31,9 +32,23 @@ _PAGE_HEADERS = {
 }
 _PAGE_END_RE = re.compile(r"持仓截止日期:\s*(\d{4})-(\d{2})-(\d{2})")
 
-# 檔案接口全滅後，冷卻期內直接跳過，避免同一次分析反覆等同一台壞主機
+# 檔案接口（某一年）連續失敗後，只在冷卻期內跳過「該年度」，
+# 不能因為 2025 年失敗就跳過同一輪的 2026 年。
 _ARCHIVES_COOLDOWN = 600.0
-_archives_down_until = 0.0
+_archives_down_until: dict[int, float] = {}
+
+
+def reset_archives_cooldown() -> None:
+    """Clear the per-year archive cooldown (used by tests and by ``--no-cache``)."""
+    _archives_down_until.clear()
+
+
+def _archive_cooling_down(fund_code: str, year: str) -> bool:
+    until = _archives_down_until.get(int(year), 0.0)
+    if time.monotonic() < until:
+        log.debug(f"[{fund_code}] 檔案接口冷卻中，跳過 {year} 年持倉")
+        return True
+    return False
 
 
 def _fetch_year_holdings(fund_code: str, year: str,
@@ -43,9 +58,7 @@ def _fetch_year_holdings(fund_code: str, year: str,
     eastmoney 的 CDN 偶爾會在 TLS 握手階段直接斷開（SSLEOFError），
     這類錯誤通常幾秒後就恢復，因此重試比直接放棄更有意義。
     """
-    global _archives_down_until
-    if time.monotonic() < _archives_down_until:
-        log.debug(f"[{fund_code}] 檔案接口冷卻中，跳過 {year} 年持倉")
+    if _archive_cooling_down(fund_code, year):
         return None
 
     last_error = None
@@ -56,8 +69,8 @@ def _fetch_year_holdings(fund_code: str, year: str,
             last_error = e
             if attempt < attempts:
                 wait = _HOLDINGS_BACKOFF * (2 ** (attempt - 1))
-                log.warning(f"[{fund_code}] {year} 年持仓获取失败"
-                            f"（第 {attempt}/{attempts} 次，{wait:.0f}s 後重試）: {e}")
+                log.debug(f"[{fund_code}] {year} 年持仓获取失败"
+                          f"（第 {attempt}/{attempts} 次，{wait:.0f}s 後重試）: {e}")
                 time.sleep(wait)
             continue
 
@@ -71,8 +84,12 @@ def _fetch_year_holdings(fund_code: str, year: str,
                         f"（第 {attempt}/{attempts} 次，{wait:.0f}s 後重試）")
             time.sleep(wait)
 
-    log.warning(f"[{fund_code}] {year} 年持仓获取失败（已重試 {attempts} 次）: {last_error}")
-    _archives_down_until = time.monotonic() + _ARCHIVES_COOLDOWN
+    reason = (describe_network_error(last_error)
+              if isinstance(last_error, BaseException) else str(last_error))
+    log.warning(f"[{fund_code}] {year} 年持仓获取失败（已重試 {attempts} 次）: {reason}")
+    if isinstance(last_error, BaseException):
+        log.debug(f"[{fund_code}] {year} 年持仓原始錯誤: {last_error}")
+    _archives_down_until[int(year)] = time.monotonic() + _ARCHIVES_COOLDOWN
     return None
 
 

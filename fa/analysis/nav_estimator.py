@@ -1,34 +1,49 @@
 # -*- coding: utf-8 -*-
-"""QDII NAV estimator (V1: weighted holdings model).
+"""QDII NAV estimator (V2.2: orchestrator only).
 
 For a QDII fund the official NAV lags the overseas close by one trading day,
-so at day ``T`` we estimate the NAV of ``T-1`` from the moves of the disclosed
-portfolio plus the currency moves::
+so at day ``T`` we estimate the NAV of ``T-1``::
 
-    NAV_T-1 = NAV_base * (1 + Σ w_i * r_i,CNY)
+    NAV_T-1 = NAV_base * (1 + R_fund)
+    R_fund  = Σ_{i ∈ C} w_i * r_i,CNY          (weights never renormalised)
 
-Only holdings with a usable price **and** FX rate enter the sum; everything
-else is reported as uncovered (``coverage_ratio``).  The estimated NAV is
-never written over the official NAV -- it goes to
-``<code>_qdii_estimate.json`` (latest) and ``<code>_qdii_estimates.csv``
-(history, later reconciled with the official NAV by
-:mod:`fa.analysis.estimation_backtest`).
+This module **coordinates**; it does not do the maths itself:
+
+1. valuation dates          :mod:`fa.analysis.valuation_dates`
+2. official NAV             :mod:`fa.data.nav`
+3. point-in-time holdings   :mod:`fa.data.qdii_holdings`
+4. market prices / FX       :mod:`fa.data.qdii_market`, :mod:`fa.data.fx`
+5. per-asset CNY returns    :mod:`fa.analysis.returns`
+6. portfolio aggregation    :mod:`fa.analysis.valuation`
+7. data-quality grading     :mod:`fa.utils.data_quality`
+8. immutable run + result   :mod:`fa.data.database` (when a repository is given)
+9. file output              : legacy JSON/CSV via the serializer below
+
+The estimated NAV is never written over the official NAV.  The legacy JSON
+field names are produced by :func:`_legacy_record` so existing reports keep
+working while the internals moved to the V2 model.
 """
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 
 from fa.analysis.estimation_backtest import backfill_history, read_history, write_history
-from fa.analysis.portfolio_return import aggregate, holding_return
+from fa.analysis.returns import calculate_asset, series_from_frame
+from fa.analysis.valuation import value_portfolio
 from fa.analysis.valuation_dates import resolve_valuation_dates
 from fa.data.fx import fetch_fx_rates
 from fa.data.nav import fetch_nav
 from fa.data.qdii_holdings import fetch_qdii_holdings, select_point_in_time
 from fa.data.qdii_market import fetch_holding_prices
+from fa.models.asset import Asset, AssetType, normalise_currency
+from fa.models.estimation import EstimationResult, EstimationRun
+from fa.models.market_data import FxSeries
+from fa.utils.calendar import to_date
+from fa.utils.data_quality import assess_quality
 from fa.utils.logging_setup import get_logger
 
 
@@ -74,9 +89,67 @@ def _nav_on(frame: pd.DataFrame, day) -> float | None:
     return float(subset.iloc[-1]["NAV"])
 
 
+def _empty_record(fund_code: str, computed_at: str, status: str, message: str,
+                  **extra) -> dict:
+    record = {
+        "status": status,
+        "fund_code": fund_code,
+        "computed_at": computed_at,
+        "message": message,
+        "holdings": [],
+        "warnings": [message] if message else [],
+        "model_version": None,
+    }
+    record.update(extra)
+    return record
+
+
+def _build_assets(holdings: pd.DataFrame, price_hits: dict) -> list[Asset]:
+    """Convert one holdings quarter into :class:`Asset` objects."""
+    assets: list[Asset] = []
+    for row in holdings.to_dict("records"):
+        ticker = str(row.get("ticker") or "").strip()
+        hit = price_hits.get(ticker) or {}
+        currency = normalise_currency(hit.get("currency") or row.get("currency_hint"))
+        market = hit.get("exchange") or row.get("market")
+        assets.append(
+            Asset(
+                asset_id=ticker,
+                name=str(row.get("name") or ticker),
+                asset_type=AssetType.EQUITY,
+                ticker=ticker,
+                market=market or None,
+                currency=currency,
+                weight=float(row.get("weight") or 0.0),
+                holding_date=to_date(row.get("holding_date")) if row.get("holding_date") else None,
+                source=str(row.get("source") or ""),
+            )
+        )
+    return assets
+
+
+def _fx_series(rates: dict) -> dict[str, FxSeries]:
+    """Wrap raw FX pandas series into the V2 :class:`FxSeries` model."""
+    out: dict[str, FxSeries] = {}
+    for currency, series in (rates or {}).items():
+        if series is None or len(series) == 0:
+            continue
+        pairs = [
+            (pd.Timestamp(index).date(), float(value))
+            for index, value in series.items()
+            if float(value) == float(value)
+        ]
+        if pairs:
+            out[str(currency).upper()] = FxSeries.from_pairs(
+                str(currency).upper(), pairs, source="yahoo"
+            )
+    return out
+
+
 def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
                       as_of: datetime | None = None, target_nav_date=None,
-                      use_cache: bool = True, write: bool = True) -> dict:
+                      use_cache: bool = True, write: bool = True,
+                      repository=None) -> dict:
     """Estimate the latest unpublished fund NAV.  Never raises on data gaps."""
     cfg = cfg or {}
     save_dir = Path(save_dir)
@@ -91,126 +164,123 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
 
     nav_df = load_nav_frame(fund_code, save_dir)
     if nav_df.empty:
-        return {
-            "status": "insufficient-data",
-            "fund_code": fund_code,
-            "computed_at": computed_at,
-            "message": "沒有官方淨值，無法估算",
-            "holdings": [],
-        }
+        return _empty_record(fund_code, computed_at, "insufficient-data",
+                             "沒有官方淨值，無法估算")
 
     dates = resolve_valuation_dates(
         nav_df["Date"], as_of=as_of, target_nav_date=target_nav_date)
     base_nav = _nav_on(nav_df, dates["base_nav_date"]) if dates.get("base_nav_date") else None
     if dates["status"] != "ok" or base_nav is None:
-        return {
-            "status": dates["status"] if dates["status"] != "ok" else "insufficient-data",
-            "fund_code": fund_code,
-            "computed_at": computed_at,
-            "message": dates.get("note") or "缺少估算所需的官方淨值",
+        status = dates["status"] if dates["status"] != "ok" else "insufficient-data"
+        return _empty_record(
+            fund_code, computed_at, status,
+            dates.get("note") or "缺少估算所需的官方淨值",
             **{k: dates.get(k) for k in ("trade_date", "target_nav_date", "base_nav_date")},
-            "nav_lag_days": dates.get("nav_lag_days"),
-            "holdings": [],
-        }
+            nav_lag_days=dates.get("nav_lag_days"),
+        )
 
-    target_date = dates["target_nav_date"]
-    base_date = dates["base_nav_date"]
+    target_date = to_date(dates["target_nav_date"])
+    base_date = to_date(dates["base_nav_date"])
 
-    # 只使用「目標日當天已經公開」的季度持倉，否則就是看得到未來的回測
+    # 只使用「目標日當天已經公開」的季度持倉，否則就是看得到未來的回測。
+    # 只取「最新可得」的持倉：歷史季度不再自動下載（上游檔案接口不可達），
+    # 需要更早日期時只能靠已匯入／已存進資料庫的歷史快照。
     portfolio = fetch_qdii_holdings(fund_code, save_dir, use_cache=use_cache,
-                                    keep_all=True)
+                                    repository=repository)
     selection = select_point_in_time(portfolio.get("holdings"), target_date)
-    if selection is None:
-        # 手上的快照可能比目標日新（或目標日很早）：改抓歷史季報再試一次
-        refreshed = fetch_qdii_holdings(fund_code, save_dir, use_cache=False,
-                                        keep_all=True)
-        selection = select_point_in_time(refreshed.get("holdings"), target_date)
-        if selection is not None:
-            portfolio = refreshed
 
     if selection is None or selection["holdings"].empty:
         available = portfolio.get("quarters") or []
-        detail = f"（現有季度：{', '.join(available)}）" if available else ""
-        return {
-            "status": "insufficient-data",
-            "fund_code": fund_code,
-            "computed_at": computed_at,
-            "message": f"目標日 {target_date} 之前尚無已披露的 QDII 持倉{detail}",
+        detail = f"（本機季度：{', '.join(available)}）" if available else ""
+        return _empty_record(
+            fund_code, computed_at, "insufficient-data",
+            (f"目標日 {target_date} 之前沒有已披露的 QDII 持倉{detail}；"
+             f"需要更早的季度持倉，請先匯入歷史快照"),
             **{k: dates.get(k) for k in ("trade_date", "target_nav_date",
                                          "base_nav_date", "timezone", "cutoff",
                                          "as_of_beijing")},
-            "base_nav": base_nav,
-            "look_ahead_safe": True,
-            "quarters_available": available,
-            "holdings": [],
-        }
+            base_nav=base_nav,
+            look_ahead_safe=True,
+            quarters_available=available,
+        )
     holdings = selection["holdings"]
 
     tickers = [str(t) for t in holdings["ticker"].tolist() if str(t).strip()]
     price_hits = fetch_holding_prices(tickers, range_=MARKET_LOOKBACK)
 
-    currencies: set[str] = set()
-    for item in holdings.to_dict("records"):
-        hit = price_hits.get(str(item["ticker"])) or {}
-        currency = hit.get("currency") or item.get("currency_hint")
-        if currency:
-            currencies.add(str(currency).upper())
-    fx_rates = fetch_fx_rates(currencies, range_=MARKET_LOOKBACK)
+    assets = _build_assets(holdings, price_hits)
+    currencies = {asset.currency for asset in assets if asset.currency}
+    fx_map = _fx_series(fetch_fx_rates(currencies, range_=MARKET_LOOKBACK))
 
-    rows: list[dict] = []
-    for row in holdings.to_dict("records"):
-        ticker = str(row["ticker"])
+    price_series = {}
+    for ticker in tickers:
         hit = price_hits.get(ticker) or {}
-        currency = hit.get("currency") or row.get("currency_hint")
-        detail = holding_return(
-            hit.get("prices"),
-            fx_rates.get(str(currency or "").upper()),
-            currency,
-            base_date,
-            target_date,
+        frame = hit.get("prices")
+        if frame is None:
+            continue
+        price_series[ticker] = series_from_frame(
+            frame,
+            ticker=ticker,
+            market=str(hit.get("exchange") or ""),
+            currency=normalise_currency(hit.get("currency")),
+            source="yahoo",
         )
-        rows.append({
-            "ticker": ticker,
-            "name": row.get("name"),
-            "weight": float(row.get("weight") or 0.0),
-            "symbol": hit.get("symbol"),
-            "currency": currency,
-            "market": hit.get("exchange") or row.get("market"),
-            "status": detail["status"],
-            "local_return": detail["local_return"],
-            "fx_return": detail["fx_return"],
-            "cny_return": detail["cny_return"],
-            "contribution": (float(row.get("weight") or 0.0) * detail["cny_return"]
-                             if detail["cny_return"] is not None else None),
-            "price_date": detail["price_date"],
-            "base_price_date": detail["base_price_date"],
-            "fx_date": detail["fx_date"],
-            "base_fx_date": detail["base_fx_date"],
-            "notes": detail["notes"],
-        })
 
-    summary = aggregate(rows)
-    estimated_return = summary["estimated_return"]
-    estimated_nav = base_nav * (1.0 + estimated_return)
-    market_dates = [r["price_date"] for r in rows if r.get("price_date")]
+    results = [
+        calculate_asset(
+            asset,
+            base_date=base_date,
+            target_date=target_date,
+            prices=price_series.get(asset.asset_id),
+            fx=fx_map.get(asset.currency),
+        )
+        for asset in assets
+    ]
+    for asset, result in zip(assets, results):
+        hit = price_hits.get(asset.asset_id) or {}
+        result.extra.update({
+            "name": asset.name,
+            "market": asset.market or "",
+            "symbol": hit.get("symbol") or asset.ticker,
+        })
+    summary = value_portfolio(
+        _snapshot_view(fund_code, selection, assets), results
+    )
+
+    if summary.estimated_return is None:
+        estimated_return = None
+        estimated_nav = None
+    else:
+        estimated_return = summary.estimated_return
+        estimated_nav = base_nav * (1.0 + estimated_return)
+    market_dates = [r.target_price_date for r in results if r.target_price_date]
     market_data_date = max(market_dates) if market_dates else None
 
-    excluded = [r for r in rows if r["status"] != "ok"]
-    uncovered = summary["uncovered_weight"]
-    warnings_list: list[str] = []
+    quality = assess_quality(
+        results,
+        disclosure_date_estimated=bool(selection.get("disclosure_date_estimated", True)),
+        base_nav_fresh=_base_nav_is_fresh(nav_df, base_date, target_date),
+    )
+
+    warnings_list: list[str] = list(portfolio.get("warnings") or [])
+    if portfolio.get("source") == "cache-stale":
+        warnings_list.append("持倉無法更新，改用本機較舊快照，權重可能已偏離實際")
+    if portfolio.get("holdings_scope") == "top10":
+        warnings_list.append("持倉僅含前十大（揭露口徑），其餘資產按未覆蓋處理")
+    excluded = summary.excluded()
     if excluded:
-        warnings_list.append(f"{len(excluded)} 隻持倉缺少可用價格、匯率或幣種，已排除在覆蓋率之外")
-    if uncovered > 0.001:
         warnings_list.append(
-            f"未覆蓋 {uncovered * 100:.1f}% 的資產按 0% 回報處理（未知，非已知事實）")
-    if summary["covered_weight"] <= 0:
-        status = "insufficient-data"
+            f"{len(excluded)} 隻持倉缺少可用價格、匯率或幣種，已排除在覆蓋率之外")
+    if summary.uncovered_weight > 0.001:
+        warnings_list.append(
+            f"未覆蓋 {summary.uncovered_weight * 100:.1f}% 的資產按 0% 回報處理"
+            f"（未知，非已知事實）")
+    warnings_list.extend(w for w in summary.warnings if w not in warnings_list)
+    if quality.reasons:
+        warnings_list.extend(r for r in quality.reasons if r not in warnings_list)
+
+    if summary.status.value == "insufficient-data":
         warnings_list.append("沒有任何持倉可估值")
-    elif uncovered > 0.001 or excluded:
-        # 覆蓋率不到 100% 時不能宣稱「已完整估算」
-        status = "partial"
-    else:
-        status = "estimated"
 
     if selection.get("holding_date"):
         try:
@@ -220,51 +290,205 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
         except (TypeError, ValueError):
             pass
 
-    record = {
-        "status": status,
+    record = _legacy_record(
+        fund_code=fund_code,
+        cfg=cfg,
+        computed_at=computed_at,
+        dates=dates,
+        target_date=target_date,
+        base_date=base_date,
+        base_nav=base_nav,
+        estimated_nav=estimated_nav,
+        summary=summary,
+        results=results,
+        selection=selection,
+        portfolio=portfolio,
+        quality=quality,
+        market_data_date=market_data_date,
+        warnings_list=warnings_list,
+    )
+
+    if estimated_nav is None:
+        log.warning(f"[{fund_code}] QDII 估算 {target_date}: 沒有可估值的持倉"
+                    f"（品質 {quality.grade.value}），未產生估算值")
+    else:
+        log.info(f"[{fund_code}] QDII 估算 {target_date}: "
+                 f"NAV {base_nav:.4f} → {estimated_nav:.4f} "
+                 f"({estimated_return * 100:+.2f}%)，覆蓋 {summary.coverage_ratio * 100:.1f}%"
+                 f"（品質 {quality.grade.value}）")
+    if write:
+        _persist(record, save_dir, nav_df)
+        _save_to_database(repository, record, nav_df, results)
+    return record
+
+
+def _snapshot_view(fund_code: str, selection: dict, assets: list[Asset]):
+    """Minimal snapshot exposing ``total_weight`` for :func:`value_portfolio`."""
+    from fa.models.holding import HoldingSnapshot
+
+    return HoldingSnapshot(
+        fund_code=str(fund_code or ""),
+        assets=assets,
+        quarter=selection.get("quarter"),
+        holding_date=to_date(selection["holding_date"]) if selection.get("holding_date") else None,
+        disclosure_date=(to_date(selection["disclosure_date"])
+                         if selection.get("disclosure_date") else None),
+        disclosure_date_estimated=bool(selection.get("disclosure_date_estimated", True)),
+        source=str(selection.get("source") or ""),
+    )
+
+
+def _base_nav_is_fresh(nav_df: pd.DataFrame, base_date: date, target_date: date) -> bool:
+    """True when the base NAV is the last published NAV before the target date."""
+    if nav_df.empty:
+        return False
+    published = pd.to_datetime(nav_df["Date"], errors="coerce").dropna()
+    before = published[published.dt.date <= target_date]
+    if before.empty:
+        return False
+    return before.iloc[-1].date() == base_date
+
+
+def _iso(value):
+    """JSON-safe ISO date string (``None`` stays ``None``)."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value)[:10]
+
+
+def _legacy_record(*, fund_code: str, cfg: dict, computed_at: str, dates: dict,
+                   target_date: date, base_date: date, base_nav: float,
+                   estimated_nav: float, summary, results, selection: dict,
+                   portfolio: dict, quality, market_data_date,
+                   warnings_list: list[str]) -> dict:
+    """Serialize the V2 objects into the field names existing consumers expect."""
+    rows = [_legacy_row(result) for result in results]
+    interaction = (summary.estimated_return or 0.0) - summary.local_contribution - summary.fx_contribution
+    return {
+        "status": summary.status.value,
         "fund_code": fund_code,
         "fund_name": cfg.get("fund_name"),
         "mode": "qdii",
+        "model_version": "2.2.0",
         "computed_at": computed_at,
-        "trade_date": dates["trade_date"],
-        "target_nav_date": target_date,
-        "base_nav_date": base_date,
+        "trade_date": dates.get("trade_date"),
+        "target_nav_date": dates.get("target_nav_date"),
+        "base_nav_date": dates.get("base_nav_date"),
         "nav_lag_days": dates["nav_lag_days"],
         "timezone": dates.get("timezone"),
         "cutoff": dates.get("cutoff"),
         "as_of_beijing": dates.get("as_of_beijing"),
-        "market_data_date": market_data_date,
-        "base_nav": round(base_nav, 4),
-        "estimated_nav": round(estimated_nav, 4),
-        "estimated_return": estimated_return,
-        "coverage_ratio": summary["covered_weight"],
-        "coverage_of_known": summary["coverage_fraction"],
-        "covered_weight": summary["covered_weight"],
-        "total_weight": summary["total_weight"],
-        "uncovered_weight": summary["uncovered_weight"],
-        "fx_contribution": summary["fx_contribution"],
-        "local_contribution": summary["local_contribution"],
-        "interaction_contribution": summary["interaction_contribution"],
-        "holdings_included": summary["holdings_included"],
-        "holdings_excluded": summary["holdings_excluded"],
+        "market_data_date": _iso(market_data_date),
+        "base_nav": round(float(base_nav), 4),
+        "estimated_nav": (round(float(estimated_nav), 4)
+                          if estimated_nav is not None else None),
+        "estimated_return": summary.estimated_return,
+        "coverage_ratio": summary.coverage_ratio,
+        "coverage_of_known": summary.coverage_of_known,
+        "covered_weight": summary.covered_weight,
+        "total_weight": summary.disclosed_weight,
+        "uncovered_weight": summary.uncovered_weight,
+        "fx_contribution": summary.fx_contribution,
+        "local_contribution": summary.local_contribution,
+        # legacy consumers read this field; V2 splits it away with Shapley, so
+        # re-emit the (now empty by construction) interaction term for them.
+        "interaction_contribution": interaction,
+        "holdings_included": summary.holdings_included,
+        "holdings_excluded": summary.holdings_excluded,
         "holdings_quarter": selection.get("quarter") or portfolio.get("quarter"),
-        "holdings_date": selection.get("holding_date"),
-        "disclosure_date": selection.get("disclosure_date"),
+        "holdings_date": _iso(selection.get("holding_date")),
+        "disclosure_date": _iso(selection.get("disclosure_date")),
         "disclosure_date_estimated": selection.get("disclosure_date_estimated", True),
         "look_ahead_safe": True,
         "quarters_available": portfolio.get("quarters") or [],
         "holdings_source": portfolio.get("source"),
+        "holdings_scope": portfolio.get("holdings_scope"),
+        "history_available": bool(portfolio.get("history_available")),
+        "data_quality": quality.grade.value,
+        "quality_score": quality.score,
         "holdings": _rounded_rows(rows),
         "warnings": warnings_list,
         "message": "；".join(warnings_list) if warnings_list else None,
     }
 
-    log.info(f"[{fund_code}] QDII 估算 {target_date}: "
-             f"NAV {base_nav:.4f} → {estimated_nav:.4f} "
-             f"({estimated_return * 100:+.2f}%)，覆蓋 {summary['covered_weight'] * 100:.1f}%")
-    if write:
-        _persist(record, save_dir, nav_df)
-    return record
+
+def _legacy_row(result) -> dict:
+    """One per-holding row in the legacy JSON shape."""
+    return {
+        "ticker": result.asset_id,
+        "name": result.extra.get("name") if result.extra else None,
+        "weight": result.weight,
+        "symbol": result.extra.get("symbol") if result.extra else None,
+        "currency": result.currency,
+        "market": result.extra.get("market") if result.extra else None,
+        "status": result.status.value,
+        "local_return": result.local_return,
+        "fx_return": result.fx_return,
+        "cny_return": result.return_cny,
+        "contribution": result.contribution,
+        "price_date": result.target_price_date.isoformat() if result.target_price_date else None,
+        "base_price_date": result.base_price_date.isoformat() if result.base_price_date else None,
+        "fx_date": result.target_fx_date.isoformat() if result.target_fx_date else None,
+        "base_fx_date": result.base_fx_date.isoformat() if result.base_fx_date else None,
+        "notes": list(result.warnings),
+    }
+
+
+def _save_to_database(repository, record: dict, nav_df: pd.DataFrame,
+                      results=None) -> str | None:
+    """Persist one immutable estimation run (V2.1 database layer)."""
+    if repository is None or not record.get("target_nav_date"):
+        return None
+    try:
+        as_of_value = record.get("as_of_beijing")
+        if isinstance(as_of_value, str):
+            try:
+                as_of_value = datetime.fromisoformat(as_of_value)
+            except ValueError:
+                as_of_value = None
+        run = EstimationRun(
+            fund_code=record["fund_code"],
+            target_nav_date=to_date(record["target_nav_date"]),
+            trade_date=to_date(record["trade_date"]),
+            base_nav_date=to_date(record["base_nav_date"]) if record.get("base_nav_date") else None,
+            as_of=as_of_value,
+            mode="qdii",
+            holdings_quarter=record.get("holdings_quarter"),
+            holdings_date=to_date(record["holdings_date"]) if record.get("holdings_date") else None,
+            disclosure_date=(to_date(record["disclosure_date"])
+                             if record.get("disclosure_date") else None),
+            disclosure_date_estimated=bool(record.get("disclosure_date_estimated")),
+            holdings_source=record.get("holdings_source") or "",
+            look_ahead_safe=bool(record.get("look_ahead_safe", True)),
+        )
+        result = EstimationResult(
+            run_id=run.run_id,
+            status=record["status"],
+            base_nav=record.get("base_nav"),
+            estimated_nav=record.get("estimated_nav"),
+            estimated_return=record.get("estimated_return"),
+            coverage_ratio=record.get("coverage_ratio") or 0.0,
+            uncovered_weight=record.get("uncovered_weight") or 0.0,
+            local_contribution=record.get("local_contribution") or 0.0,
+            fx_contribution=record.get("fx_contribution") or 0.0,
+            data_quality=record.get("data_quality") or "unknown",
+            quality_score=record.get("quality_score"),
+            warnings=list(record.get("warnings") or []),
+            message=record.get("message") or "",
+        )
+        if "Date" in nav_df.columns and "NAV" in nav_df.columns:
+            repository.save_official_nav(
+                record["fund_code"],
+                [(row["Date"], row["NAV"]) for row in nav_df.to_dict("records")],
+            )
+        repository.save_estimation(run, record, result)
+        log.info(f"[{record['fund_code']}] 估算已寫入資料庫 run={run.run_id[:8]}")
+        return run.run_id
+    except Exception as exc:  # noqa: BLE001 - 資料庫失敗不該讓估算消失
+        log.warning(f"[{record.get('fund_code')}] 估算寫入資料庫失敗: {exc}")
+        return None
 
 
 def _rounded_rows(rows: list[dict]) -> list[dict]:

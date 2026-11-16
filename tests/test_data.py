@@ -45,10 +45,10 @@ class PingzhongNavTests(unittest.TestCase):
 
 class HoldingsRetryTests(unittest.TestCase):
     def setUp(self):
-        holdings_mod._archives_down_until = 0.0
+        holdings_mod.reset_archives_cooldown()
 
     def tearDown(self):
-        holdings_mod._archives_down_until = 0.0
+        holdings_mod.reset_archives_cooldown()
 
     def _df(self):
         return pd.DataFrame({"股票代码": ["600519"], "季度": ["2025年1季度"]})
@@ -90,6 +90,24 @@ class HoldingsRetryTests(unittest.TestCase):
             self.assertIsNone(_fetch_year_holdings("000369", "2025", attempts=2))
         self.assertEqual(len(calls), 2)
 
+    def test_cooldown_only_blocks_the_year_that_failed(self):
+        """一年失敗後的冷卻只鎖那一年，不能連帶跳過其他年份。"""
+        seen = []
+
+        def fake(**kwargs):
+            seen.append(str(kwargs.get("date")))
+            raise RuntimeError("SSL EOF")
+
+        with mock.patch("fa.data.holdings.ak.fund_portfolio_hold_em", side_effect=fake), \
+                mock.patch("fa.data.holdings.time.sleep"):
+            self.assertIsNone(_fetch_year_holdings("000369", "2025", attempts=1))
+            # 2025 進入冷卻，同一年再問不會再打網絡
+            self.assertIsNone(_fetch_year_holdings("000369", "2025", attempts=1))
+            # 但 2026 仍然要打
+            self.assertIsNone(_fetch_year_holdings("000369", "2026", attempts=1))
+
+        self.assertEqual(seen, ["2025", "2026"])
+
 
 _PAGE_HTML = """
 <table class="ui-table-hover" width="100%" border="0" cellspacing="0" cellpadding="0"><tr>
@@ -115,10 +133,10 @@ class _FakeResponse:
 
 class HoldingsPageTests(unittest.TestCase):
     def setUp(self):
-        holdings_mod._archives_down_until = 0.0
+        holdings_mod.reset_archives_cooldown()
 
     def tearDown(self):
-        holdings_mod._archives_down_until = 0.0
+        holdings_mod.reset_archives_cooldown()
 
     def test_parses_page_table(self):
         with mock.patch("fa.data.holdings.requests.get",

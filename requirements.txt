@@ -1,4 +1,8 @@
-akshare>=1.12.0,<2.0.0
+# AKShare 的基金持倉（fund_portfolio_hold_em / FundArchivesDatas）與淨值接口
+# 在小版本之間改過行為，範圍放太寬會令不同時間安裝的環境拿到不同結果。
+# 本專案驗證過的版本：1.18.88（Python 3.10）與 1.18.97（conda quant-finance）。
+# 升級前請先跑 `python test_eastmoney_connection.py` 與 `python -m unittest discover -s tests -t .`。
+akshare>=1.18.88,<1.19.0
 pandas>=2.0.0,<3.0.0
 numpy>=1.24.0,<3.0.0
 plotly>=5.18.0,<7.0.0

@@ -49,6 +49,19 @@ REQUEST_TIMEOUT = float(os.environ.get("FA_REQUEST_TIMEOUT", "30"))
 # 日誌文件；設為空字符串可關閉文件日誌
 LOG_FILE = os.environ.get("FA_LOG_FILE", str(PROJECT_ROOT / "fund_analyzer.log"))
 
+# --- V2 價格對齊 ------------------------------------------------------------
+# 落後幾個交易日以上開始標記為「過期」。預設 0：只要不是目標日當天就降級並警告；
+# 真正的取捨由 EXCLUDE 決定（1..EXCLUDE-1 保留、>=EXCLUDE 排除）。
+STALE_SESSIONS_WARN = int(os.environ.get("FA_STALE_SESSIONS_WARN", "0"))
+# 落後達到這個交易日數就排除（不計入覆蓋率）；與 WARN 一起構成 V2 的三段政策
+# 0 = 正常、1..EXCLUDE-1 = 輕微過期保留、>=EXCLUDE = 排除、>MAX = 嚴重過期。
+STALE_SESSIONS_EXCLUDE = int(os.environ.get("FA_STALE_SESSIONS_EXCLUDE", "3"))
+# 超過這個交易日數視為嚴重過期（日誌級別更高，同樣排除）。
+STALE_SESSIONS_MAX = int(os.environ.get("FA_STALE_SESSIONS_MAX", "10"))
+
+# 現金利率缺失時使用的年度假設利率（0 表示仍按 0%，但一定留下警告）。
+CASH_ASSUMPTION_RATE = float(os.environ.get("FA_CASH_ASSUMPTION_RATE", "0.0"))
+
 
 def merge_config(cfg: dict | None = None) -> dict:
     """Return ``DEFAULT_CONFIG`` overlaid with every key present in ``cfg``.

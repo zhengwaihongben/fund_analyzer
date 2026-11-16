@@ -182,7 +182,10 @@ class QdiiEstimateWindow(tk.Toplevel):
 
         note_parts = []
         if data.get("holdings_quarter"):
-            note_parts.append(f"持倉 {data['holdings_quarter']}（權重為披露值，非實際持倉）")
+            scope = {"top10": "前十大（揭露口徑）", "full_portfolio": "完整組合"}.get(
+                data.get("holdings_scope"), "範圍未知")
+            note_parts.append(
+                f"持倉 {data['holdings_quarter']} · {scope}（權重為披露值，非實際持倉）")
         if data.get("look_ahead_safe"):
             note_parts.append("只用目標日以前已披露的季度（無前視偏差）")
         if data.get("nav_lag_days"):

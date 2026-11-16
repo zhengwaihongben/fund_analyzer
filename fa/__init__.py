@@ -45,7 +45,12 @@ from fa.data.market import (  # noqa: F401
     _yf_run,
     _yf_ticker_history,
 )
-from fa.data.qdii_holdings import fetch_qdii_holdings, select_point_in_time  # noqa: F401
+from fa.data.qdii_holdings import (  # noqa: F401
+    fetch_qdii_holdings,
+    load_quarters_from_db,
+    save_quarters_to_db,
+    select_point_in_time,
+)
 from fa.data.qdii_market import fetch_holding_price, fetch_holding_prices  # noqa: F401
 from fa.data.fx import fetch_fx_rates, fetch_fx_series  # noqa: F401
 from fa.data.fund_info import fetch_fund_profile, resolve_fund_mode  # noqa: F401
@@ -55,6 +60,8 @@ from fa.analysis.post_market import fetch_post_market_estimate  # noqa: F401
 from fa.analysis.nav_estimator import estimate_qdii_nav  # noqa: F401
 from fa.analysis.estimation_backtest import run_backtest  # noqa: F401
 from fa.analysis.valuation_dates import order_trade_date, resolve_valuation_dates  # noqa: F401
+from fa.analysis.returns import calculate_asset, get_calculator  # noqa: F401
+from fa.analysis.valuation import value_portfolio  # noqa: F401
 from fa.viz.charts import (  # noqa: F401
     plot_excess_return,
     plot_holdings,
@@ -79,12 +86,14 @@ __all__ = [
     "_clean_holdings", "top_holdings",
     "_yf_run", "_yf_download_df", "_yf_ticker_history",
     "fetch_qdii_holdings", "select_point_in_time",
+    "load_quarters_from_db", "save_quarters_to_db",
     "fetch_holding_price", "fetch_holding_prices",
     "fetch_fx_rates", "fetch_fx_series",
     "fetch_fund_profile", "resolve_fund_mode",
     "compute_technical", "compute_risk_metrics",
     "fetch_post_market_estimate", "estimate_qdii_nav", "run_backtest",
     "resolve_valuation_dates", "order_trade_date",
+    "calculate_asset", "get_calculator", "value_portfolio",
     "plot_trend", "plot_holdings", "plot_technical", "plot_risk_metrics",
     "plot_excess_return",
     "generate_master_report", "analyze_fund", "main",

@@ -19,13 +19,15 @@ hints and the disclosure-date logic.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from fa.data.holdings import _clean_holdings, _fetch_year_holdings, fetch_holdings_page
+from fa.data.holdings import _clean_holdings, fetch_holdings_page
 from fa.data.qdii_market import SYMBOL_OVERRIDES
+from fa.models.asset import Asset, AssetType
+from fa.models.holding import HoldingSnapshot, snapshot_from_rows
 from fa.utils.cache import is_cache_fresh, read_cache_df, write_cache_df
 from fa.utils.calendar import to_date
 from fa.utils.logging_setup import get_logger
@@ -55,6 +57,79 @@ _OVERRIDE_MARKET = {
     "NOVN.SW": ("SIX", "CHF"),
     "AZN.L": ("LSE", "GBP"),
 }
+
+
+def save_quarters_to_db(repository, fund_code: str, frame: pd.DataFrame,
+                        source: str = "eastmoney-archives") -> int:
+    """把每個季度的持倉寫進 SQLite（V2.1 的資料層），失敗只記錄不拋出。
+
+    ``source`` 必須是資料真正的來源（``eastmoney-archives`` / ``eastmoney-page``），
+    否則日後追查「這季資料從哪來」會得到錯誤答案。
+    """
+    if repository is None or frame is None or frame.empty:
+        return 0
+    source = source or "unknown"
+    saved = 0
+    for quarter, chunk in frame.groupby("quarter", sort=True, observed=True):
+        rows = []
+        for row in chunk.to_dict("records"):
+            rows.append({
+                "ticker": row.get("ticker"),
+                "name": row.get("name"),
+                "weight": row.get("weight", 0.0),
+                "market": row.get("market"),
+                "currency": row.get("currency_hint"),
+                "holding_date": row.get("holding_date"),
+                "disclosure_date": row.get("disclosure_date"),
+                "asset_type": AssetType.EQUITY,
+            })
+        try:
+            snapshot = snapshot_from_rows(
+                fund_code, rows,
+                quarter=str(quarter),
+                holding_date=to_date(chunk["holding_date"].iloc[0]) if "holding_date" in chunk else None,
+                disclosure_date=to_date(chunk["disclosure_date"].iloc[0]) if "disclosure_date" in chunk else None,
+                disclosure_date_estimated=True,
+                source=source,
+            )
+            repository.save_snapshot(snapshot)
+            saved += 1
+        except Exception as exc:  # noqa: BLE001 - 資料庫不可用不該中斷估值
+            log.debug(f"[{fund_code}] 持倉寫入資料庫失敗（{quarter}）: {exc}")
+            break
+    if saved:
+        log.info(f"[{fund_code}] {saved} 個季度持倉已寫入資料庫（來源 {source}）")
+    return saved
+
+
+def load_quarters_from_db(repository, fund_code: str) -> pd.DataFrame:
+    """從 SQLite 讀回歷史持倉（網絡不可用時的歷史來源）。"""
+    if repository is None:
+        return pd.DataFrame(columns=COLUMNS)
+    rows = []
+    try:
+        snapshots = repository.load_snapshots(fund_code)
+    except Exception as exc:  # noqa: BLE001 - 資料庫不可用視同沒有歷史
+        log.debug(f"[{fund_code}] 讀取資料庫持倉失敗: {exc}")
+        return pd.DataFrame(columns=COLUMNS)
+    for snapshot in snapshots or []:
+        for asset in snapshot.assets:
+            rows.append({
+                "ticker": asset.ticker or asset.asset_id,
+                "name": asset.name,
+                "weight": asset.weight,
+                "currency_hint": asset.currency,
+                "market": asset.market,
+                "quarter": snapshot.quarter,
+                "holding_date": snapshot.holding_date.isoformat() if snapshot.holding_date else "",
+                "disclosure_date": snapshot.disclosure_date.isoformat() if snapshot.disclosure_date else "",
+                "disclosure_date_estimated": snapshot.disclosure_date_estimated,
+            })
+    if not rows:
+        return pd.DataFrame(columns=COLUMNS)
+    frame = pd.DataFrame(rows, columns=COLUMNS)
+    frame = frame.sort_values(["quarter", "weight"], ascending=[True, False])
+    return frame.reset_index(drop=True)
 
 
 def quarter_end(label: str) -> date | None:
@@ -190,7 +265,12 @@ def select_point_in_time(holdings: pd.DataFrame, target_date) -> dict | None:
 
 def _cached_holdings(cache_path: Path, fund_code: str, source: str,
                      note: str | None = None) -> dict | None:
-    """把既有快照讀成回傳結構；讀不到或為空回傳 ``None``。"""
+    """Read an existing snapshot; ``None`` when missing, unreadable or empty.
+
+    The frame may hold several quarters (imported history, the SQLite layer or
+    an earlier run); the newest one is what the estimate uses by default, while
+    the older ones stay available to :func:`select_point_in_time`.
+    """
     path = Path(cache_path)
     if not path.exists():
         return None
@@ -205,132 +285,123 @@ def _cached_holdings(cache_path: Path, fund_code: str, source: str,
         return None
     if note:
         log.warning(f"[{fund_code}] {note}")
-    latest = _latest_quarter(cached)
-    if latest and "quarter" in cached.columns:
-        newest = cached[cached["quarter"].astype(str) == latest]
+    return _assemble(fund_code, cached, source, cache_hit=True)
+
+
+def _assemble(fund_code: str, holdings: pd.DataFrame, source: str | None,
+              *, cache_hit: bool, warnings: list[str] | None = None) -> dict:
+    """Package a holdings frame for the estimator / GUI.
+
+    ``holdings_scope`` says how much of the fund the numbers cover (Eastmoney
+    only publishes the top ten, so ``top10`` is the normal case), and
+    ``history_available`` says whether anything older than the newest quarter is
+    on hand -- the two facts a caller needs instead of a vague "complete" flag.
+    """
+    quarters = _quarters(holdings)
+    latest = quarters[-1] if quarters else None
+    if latest and "quarter" in holdings.columns:
+        newest = holdings[holdings["quarter"].astype(str) == latest]
     else:
-        newest = cached
+        newest = holdings
+    scope = "top10" if len(newest) <= 10 else "full_portfolio"
     return {
-        "holdings": cached.reset_index(drop=True),
-        "quarters": _quarters(cached),
+        "holdings": holdings.reset_index(drop=True),
+        "quarters": quarters,
         "quarter": latest,
         "holding_date": _first(newest, "holding_date"),
         "disclosure_date": _first(newest, "disclosure_date"),
         "source": source,
-        "cache_hit": True,
+        "cache_hit": cache_hit,
+        "holdings_scope": scope,
+        "history_available": len(quarters) > 1,
+        "warnings": list(warnings or []),
     }
 
 
-def fetch_qdii_holdings(fund_code: str, save_dir: Path,
-                        use_cache: bool = True, keep_all: bool = False) -> dict:
-    """Disclosed QDII portfolio for ``fund_code``.
-
-    Returns ``{"holdings": DataFrame, "quarters", "quarter", "holding_date",
-    "disclosure_date", "source", "cache_hit"}``.  An empty frame means the
-    portfolio could not be obtained; the estimator turns that into a
-    ``status="insufficient-data"`` result instead of inventing weights.
-
-    Fallback order: fresh cache → fund home page (latest quarter, top 10) →
-    archives API → any older snapshot on disk.  With ``keep_all=True`` every
-    disclosed quarter is kept and the archives are tried first, because an
-    older target date needs quarters the home page does not show.
-    """
-    cache_path = Path(save_dir) / f"{fund_code}{QDII_HOLDINGS_SUFFIX}"
-    empty = {
+def _empty_result() -> dict:
+    return {
         "holdings": pd.DataFrame(columns=COLUMNS),
         "quarters": [],
         "quarter": None, "holding_date": None, "disclosure_date": None,
         "source": None, "cache_hit": False,
+        "holdings_scope": None, "history_available": False,
+        "warnings": [],
     }
+
+
+def _store_page(fund_code: str, fetched: pd.DataFrame, cache_path: Path,
+                repository) -> dict:
+    """Merge the freshly fetched quarter with whatever history is on hand.
+
+    The new quarter must not erase older snapshots that were imported earlier:
+    they are the only material a point-in-time estimate has to work with.
+    """
+    holdings = fetched
+    known = _cached_holdings(cache_path, fund_code, "cache")
+    if known is not None and not known["holdings"].empty:
+        merged = pd.concat([known["holdings"], fetched], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["quarter", "ticker"], keep="last")
+        holdings = merged.sort_values(
+            ["quarter", "weight"], ascending=[True, False]).reset_index(drop=True)
+    write_cache_df(holdings, cache_path)
+    save_quarters_to_db(repository, fund_code, holdings, source="eastmoney-page")
+    result = _assemble(fund_code, holdings, "eastmoney-page", cache_hit=False)
+    log.info(f"[{fund_code}] QDII 持倉 {len(holdings)} 條／{len(result['quarters'])} 個季度"
+             f"（最新 {result['quarter']}，範圍 {result['holdings_scope']}）"
+             f"← eastmoney-page → {cache_path.name}")
+    return result
+
+
+def fetch_qdii_holdings(fund_code: str, save_dir: Path,
+                        use_cache: bool = True, repository=None) -> dict:
+    """Latest disclosed QDII portfolio for ``fund_code``.
+
+    Latest-only by design.  The Eastmoney archive endpoint that serves older
+    quarters is unreachable from many networks, and waiting for it turned one
+    bad afternoon into a permanent "history missing" state; the estimator only
+    needs the newest public portfolio.  Anything older must come from history
+    that was imported or saved earlier (SQLite), and :func:`select_point_in_time`
+    uses it when a date-specific estimate asks for it.
+
+    Order: fresh cache → fund home page (one request) → SQLite snapshot →
+    older cache.  An empty frame means no portfolio could be obtained.
+
+    Returns ``{"holdings", "quarters", "quarter", "holding_date",
+    "disclosure_date", "source", "cache_hit", "holdings_scope",
+    "history_available", "warnings"}``.
+    """
+    cache_path = Path(save_dir) / f"{fund_code}{QDII_HOLDINGS_SUFFIX}"
 
     if use_cache and cache_path.exists() and is_cache_fresh(cache_path):
         cached = _cached_holdings(cache_path, fund_code, "cache")
-        if cached is not None and (not keep_all or cached["quarters"]):
+        if cached is not None:
             log.info(f"[{fund_code}] QDII 持倉來自緩存: {cache_path.name}")
             return cached
 
-    holdings = pd.DataFrame(columns=COLUMNS)
-    source = None
+    page_raw = fetch_holdings_page(fund_code)
+    if page_raw is not None and not page_raw.empty:
+        fetched = build_qdii_holdings(page_raw)
+        if not fetched.empty:
+            return _store_page(fund_code, fetched, cache_path, repository)
 
-    if keep_all:
-        holdings, source = _load_quarters(fund_code)
-        if holdings.empty:
-            page_raw = fetch_holdings_page(fund_code)
-            if page_raw is not None and not page_raw.empty:
-                holdings = build_qdii_holdings(page_raw)
-                if not holdings.empty:
-                    source = "eastmoney-page"
-    else:
-        # 只需要最新季度：首頁一次請求即可，先走快路徑
-        page_raw = fetch_holdings_page(fund_code)
-        if page_raw is not None and not page_raw.empty:
-            holdings = build_qdii_holdings(page_raw)
-            if not holdings.empty:
-                source = "eastmoney-page"
-        if holdings.empty:
-            holdings, source = _load_quarters(fund_code)
+    db_frame = load_quarters_from_db(repository, fund_code)
+    if not db_frame.empty:
+        log.info(f"[{fund_code}] 網絡不可用，改用資料庫中的 QDII 持倉快照")
+        return _assemble(fund_code, db_frame, "database", cache_hit=False)
 
-    if holdings.empty:
-        stale = _cached_holdings(
-            cache_path, fund_code, "cache-stale",
-            note=f"QDII 持倉無法更新，改用較舊快照: {cache_path.name}")
-        if stale is not None:
-            return stale
-        log.warning(f"[{fund_code}] 無法取得 QDII 持倉")
-        return empty
+    stale = _cached_holdings(cache_path, fund_code, "cache-stale",
+                             note="QDII 持倉無法更新，改用本機較舊快照")
+    if stale is not None:
+        return stale
 
-    if keep_all:
-        holdings = _merge_quarters(holdings, _cached_holdings(cache_path, fund_code, "cache"))
-    write_cache_df(holdings, cache_path)
-    latest = _latest_quarter(holdings)
-    newest = holdings[holdings["quarter"].astype(str) == latest] if latest else holdings
-    log.info(f"[{fund_code}] QDII 持倉 {len(holdings)} 條／{len(_quarters(holdings))} 個季度"
-             f"（最新 {latest}）← {source} → {cache_path.name}")
-    return {
-        "holdings": holdings,
-        "quarters": _quarters(holdings),
-        "quarter": latest,
-        "holding_date": _first(newest, "holding_date"),
-        "disclosure_date": _first(newest, "disclosure_date"),
-        "source": source,
-        "cache_hit": False,
-    }
-
-
-def _load_quarters(fund_code: str) -> tuple[pd.DataFrame, str | None]:
-    """Fetch every archived quarter (slow path, one request per year)."""
-    from datetime import datetime
-    years = [str(y) for y in range(datetime.now().year - 1, datetime.now().year + 1)]
-    frames = []
-    for year in years:
-        frame = _fetch_year_holdings(fund_code, year)
-        if frame is not None and not frame.empty:
-            frames.append(frame)
-    if not frames:
-        return pd.DataFrame(columns=COLUMNS), None
-    return build_qdii_holdings(pd.concat(frames, ignore_index=True), keep_all=True), \
-        "eastmoney-archives"
-
-
-def _merge_quarters(fetched: pd.DataFrame, cached: dict | None) -> pd.DataFrame:
-    """Union of the fetched quarters and the cached ones (fetched wins)."""
-    if not cached or cached.get("holdings") is None or cached["holdings"].empty:
-        return fetched
-    merged = pd.concat([cached["holdings"], fetched], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["quarter", "ticker"], keep="last")
-    merged = merged.sort_values(["quarter", "weight"], ascending=[True, False])
-    return merged.reset_index(drop=True)
+    log.warning(f"[{fund_code}] 無法取得 QDII 持倉")
+    return _empty_result()
 
 
 def _quarters(frame: pd.DataFrame) -> list[str]:
     if frame is None or frame.empty or "quarter" not in frame.columns:
         return []
     return sorted({str(q) for q in frame["quarter"] if str(q).strip()})
-
-
-def _latest_quarter(frame: pd.DataFrame) -> str | None:
-    quarters = _quarters(frame)
-    return quarters[-1] if quarters else None
 
 
 def _first(frame: pd.DataFrame, column: str):
