@@ -24,6 +24,7 @@ from fa.models.estimation import (
 )
 from fa.models.holding import HoldingSnapshot, HoldingValidationError, snapshot_from_rows
 from fa.models.market_data import (
+    AvailabilitySource,
     FxSeries,
     MarketDataError,
     PricePoint,
@@ -52,6 +53,7 @@ __all__ = [
     "HoldingSnapshot",
     "HoldingValidationError",
     "snapshot_from_rows",
+    "AvailabilitySource",
     "FxSeries",
     "MarketDataError",
     "PricePoint",

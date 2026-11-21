@@ -6,7 +6,7 @@
 |-------|---------|---------|
 | Unit | one function, hand-computed expectation | equity return, FX conversion, Shapley split |
 | Integration | modules working together | holdings → prices → FX → NAV → DB |
-| Regression | old behaviour still works | the existing V1 suite (113 tests) |
+| Regression | old behaviour still works | the existing V1 suite plus the V2 suites (781 at the end of Stage D round 7; 783 after the Stage E self-heal test; 846 after the Stage E coverage round) |
 | Acceptance | the feature really meets the requirement | PIT, calendar, coverage, reproducibility, GUI |
 
 Rules:
@@ -39,20 +39,56 @@ Rules:
 
 ## 3. Coverage targets
 
-Measured with `coverage.py` over `fa/analysis/returns/`,
-`fa/analysis/valuation/`, `fa/analysis/nav_estimator.py`,
-`fa/analysis/valuation_dates.py`, `fa/utils/data_quality.py`:
+The target set is `fa/analysis/returns/`, `fa/analysis/valuation/`,
+`fa/analysis/nav_estimator.py`, `fa/analysis/valuation_dates.py`,
+`fa/utils/data_quality.py`, at **≥ 90 % statement coverage**. Coverage is a
+hygiene metric, not proof — every financial formula also needs a hand-computed
+expected value in a test.
 
-* statement coverage ≥ 90 % for the modules above;
-* coverage is a hygiene metric, not proof — every financial formula also needs
-  a hand-computed expected value in a test.
+`coverage.py` is **not installed** and adding a dependency for this is not
+allowed, so the measurement uses a `sys.settrace` tracer
+(`scripts/coverage_core.py`, statement lines only, no branch coverage). The
+result is recorded, not assumed:
+
+*Initial Stage E delivery, before Round 8 fixes:* suite **782 tests**;
+**88.2 %** (665/754 statement lines) for the documented target set, measured
+with a denominator that counted function bodies only; the 90 % gate was
+**not met**. Below the threshold at that time: `fa/analysis/returns/base.py`
+85.5 %, `fa/analysis/returns/fx.py` 66.7 %, `fa/analysis/nav_estimator.py`
+86.6 %. These figures are history, not the current state.
 
 Run:
 
 ```bash
-python -m coverage run -m unittest discover -s tests -t .
-python -m coverage report --include="fa/analysis/*,fa/utils/data_quality.py"
+python scripts/coverage_core.py            # writes docs/development/stageE_coverage.md
 ```
+
+Current result (Round 9, Python 3.10.9). The denominator is the whole module —
+module-level, class-body and function-body statements, docstrings excluded —
+because `sys.settrace()` is installed before `unittest` discovery, so
+import-time lines are observable:
+
+| Measurement | Result |
+| --- | --- |
+| Full test suite | **846 tests** |
+| Coverage measurement suite | **835 tests** (11 GUI tests excluded) |
+| Executable statements (documented target set) | **708** |
+| Executed statements | **704** |
+| Overall core target coverage | **99.4 %** |
+| Per-module requirement | every target module ≥ 90 % — `returns/base.py` 98.1 %, `nav_estimator.py` 99.7 %, the other eight 100 % |
+| Additional modules (information only) | 91.8 % (1583/1724) |
+
+The 11 GUI tests are excluded from the coverage measurement only because Tk
+teardown under `sys.settrace` aborts the interpreter; they remain part of the
+normal full suite. Four statements in the target set are still never executed
+(`returns/base.py` lines 45, 227, 237 and `nav_estimator.py` line 362); each is
+a defensive branch documented in the V2.3.2 specification §19.4.
+`docs/development/stageE_coverage.md` is the authoritative per-module report.
+
+**The 90 % coverage gate is met.**
+
+Stage status: A, B, C and D **accepted**; **Stage E delivered, pending
+independent final acceptance**; V2.4 not started.
 
 ## 4. Test data
 
@@ -68,7 +104,7 @@ python -m coverage report --include="fa/analysis/*,fa/utils/data_quality.py"
 |-------|-----------|
 | V2.0 | models exist and validate; spec docs written; directory layout created; unit tests for models/quality pass |
 | V2.1 | SQLite schema + migrations work; repository round-trips snapshots/prices/fx/nav/runs; a run is reproducible from stored inputs; calendars correct; data quality graded; a latest-quarter-only portfolio is enough to value NAV (no archive-history download required — history is optional and only widens point-in-time coverage) |
-| V2.2 | four asset calculators + portfolio valuation + Shapley attribution; coverage/status correct; integration test end-to-end |
+| V2.2 | four asset calculators + portfolio valuation + Shapley attribution; coverage/status correct; integration test end-to-end; after the V2.2.1 review also: stale status reaches quality, assets are classified (not all equity), currency mismatch is rejected, inputs are stored per `run_id`, and look-ahead status is a four-value enum |
 | V2.3 | backtest over stored runs: MAE/RMSE/mean error/max abs error, grouped by asset type, market and coverage bucket |
 | V2.4 | GUI shows estimate with quality/coverage/warnings; backtest window; README updated; full regression suite green |
 

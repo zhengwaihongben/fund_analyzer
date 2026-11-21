@@ -45,6 +45,26 @@ class ReturnCalculator(Protocol):
     ) -> AssetReturnResult: ...
 
 
+def _available_price_type(frame) -> str:
+    """What the source actually *offered*, read from the frame's own columns.
+
+    ``available_price_type`` describes the vendor's data, so it must come from
+    the columns present (and usable), not from a hard-coded default: a frame
+    that only carried a raw ``Close`` must record ``"close"``, while one that
+    carried both records ``"close+adj_close"``.
+    """
+    columns = {str(column).strip().lower() for column in getattr(frame, "columns", [])}
+    has_close = "close" in columns
+    has_adjusted = bool(columns & {"adjclose", "adj_close", "price"})
+    if has_adjusted and has_close:
+        return "close+adj_close"
+    if has_adjusted:
+        return "adjusted_close"
+    if has_close:
+        return "close"
+    return ""
+
+
 def series_from_frame(
     frame,
     *,
@@ -52,17 +72,19 @@ def series_from_frame(
     market: str = "",
     currency: str = "",
     source: str = "",
-    price_type: str = "adjusted_close",
+    price_type: str | None = None,
 ) -> PriceSeries:
     """Build a :class:`PriceSeries` from a quotes DataFrame.
 
     Accepts the columns produced by the data layer (``Date`` plus ``Close`` /
     ``AdjClose`` / ``Price``); rows without a usable date or close are skipped
-    rather than guessed.
+    rather than guessed.  ``price_type`` overrides the derived availability
+    description — normally it should be left as ``None``.
     """
     if frame is None or len(frame) == 0:
         return PriceSeries(ticker=ticker, market=market, currency=currency, source=source)
 
+    available_type = price_type or _available_price_type(frame)
     points: list[PricePoint] = []
     if hasattr(frame, "to_dict"):
         rows = frame.to_dict("records")
@@ -91,7 +113,7 @@ def series_from_frame(
                 adj_close=float(adjusted) if adjusted is not None else None,
                 market=market,
                 currency=currency,
-                price_type=price_type,
+                available_price_type=available_type,
                 source=source,
             )
         )
@@ -112,7 +134,27 @@ class FxOutcome:
 
     @property
     def ok(self) -> bool:
-        return self.status.is_ok
+        """True when the FX leg may be used (slightly stale FX is still usable)."""
+        return self.status.is_usable
+
+
+def resolve_currency(
+    declared: str | None, quoted: str | None = ""
+) -> tuple[str, str]:
+    """Decide which currency an asset return must use.
+
+    Returns ``(currency, problem)`` where ``problem`` is ``""`` when the answer
+    is unambiguous.  A declared currency and a different quote currency is a
+    *data-consistency failure*, not something to paper over: converting a HKD
+    quote with a USD/CNY rate produces a plausible-looking but wrong number.
+    """
+    asset_code = normalise_currency(declared)
+    quote_code = normalise_currency(quoted)
+    if asset_code and quote_code and asset_code != quote_code:
+        return quote_code or asset_code, (
+            f"宣告幣種 {asset_code} 與行情幣種 {quote_code} 不一致，拒絕換算"
+        )
+    return asset_code or quote_code, ""
 
 
 def cny_return(local_return: float, fx_return: float) -> float:
@@ -139,10 +181,25 @@ def convert_to_cny(
         return FxOutcome(fx_return=0.0)
     if fx is None:
         return FxOutcome(status=ReturnStatus.MISSING_FX)
+    fx_code = normalise_currency(fx.currency)
+    if fx_code and fx_code != code:
+        return FxOutcome(
+            status=ReturnStatus.MISSING_FX,
+            warnings=(f"匯率序列貨幣 {fx_code} 與資產貨幣 {code} 不一致，拒絕換算",),
+        )
+    fx_base = normalise_currency(getattr(fx, "base_currency", "") or "")
+    if fx_base != "CNY":
+        # 「USD 序列」只說明分子，沒有說明分母。EUR-per-USD 被當成 CNY-per-USD
+        # 使用時數字看起來合理，實際上是完全不同的匯率；沒有聲明基準同樣不能假設。
+        reason = (f"匯率基準貨幣 {fx_base} 並非 CNY，拒絕換算" if fx_base
+                  else "匯率序列缺少基準貨幣聲明（應為 CNY），拒絕換算")
+        return FxOutcome(status=ReturnStatus.MISSING_FX, warnings=(reason,))
 
     base_align = align_fx(fx, base_date, calendar=calendar, base=True)
     target_align = align_fx(fx, target_date, calendar=calendar)
     warnings: list[str] = []
+    base_stale = False
+    target_stale = False
     for alignment, label in ((base_align, "基準日"), (target_align, "目標日")):
         if alignment.excluded:
             return FxOutcome(
@@ -152,6 +209,10 @@ def convert_to_cny(
                 warnings=(f"{code} 匯率在{label}過期不可用",),
             )
         if alignment.is_stale:
+            if label == "基準日":
+                base_stale = True
+            else:
+                target_stale = True
             warnings.append(
                 f"{code} 匯率在{label}落後 {alignment.stale_sessions} 個交易日"
             )
@@ -179,7 +240,14 @@ def convert_to_cny(
             target_fx_date=target_align.actual_date,
             warnings=tuple(warnings) + (f"{code} 基準日匯率為 0，無法換算",),
         )
+    if base_stale:
+        status = ReturnStatus.STALE_BASE_FX
+    elif target_stale:
+        status = ReturnStatus.STALE_FX
+    else:
+        status = ReturnStatus.OK
     return FxOutcome(
+        status=status,
         fx_return=rate_target / rate_base - 1.0,
         base_fx_date=base_align.actual_date,
         target_fx_date=target_align.actual_date,
@@ -212,7 +280,9 @@ def priced_return(
     understating the return.
     """
     warnings: list[str] = []
-    currency = normalise_currency(asset.currency or (prices.currency if prices else ""))
+    currency, currency_problem = resolve_currency(
+        asset.currency, prices.currency if prices is not None else ""
+    )
 
     if prices is None or len(prices) == 0:
         return AssetReturnResult(
@@ -221,6 +291,14 @@ def priced_return(
             weight=asset.weight,
             currency=currency,
             warnings=["沒有價格資料"],
+        )
+    if currency_problem:
+        return AssetReturnResult(
+            asset_id=asset.asset_id,
+            status=ReturnStatus.CURRENCY_MISMATCH,
+            weight=asset.weight,
+            currency=currency,
+            warnings=[currency_problem],
         )
 
     base_align = align_price(prices, base_date, calendar=calendar, base=True)
@@ -247,14 +325,28 @@ def priced_return(
                 f"價格過期已排除（基準日 {base_align.stale_sessions}、目標日 "
                 f"{target_align.stale_sessions} 個交易日）"
             ],
+            extra={"excluded": True, "stale_sessions": {
+                "base": base_align.stale_sessions, "target": target_align.stale_sessions}},
             **result_kwargs,
         )
+    local_status = ReturnStatus.OK
     for alignment, label in ((base_align, "基準日"), (target_align, "目標日")):
         if alignment.is_stale:
             warnings.append(f"價格在{label}落後 {alignment.stale_sessions} 個交易日")
+            if label == "基準日":
+                local_status = ReturnStatus.STALE_BASE_PRICE
+            elif local_status is ReturnStatus.OK:
+                local_status = ReturnStatus.STALE_PRICE
 
     base_value, base_adjusted = _point_value(base_point)
     target_value, target_adjusted = _point_value(target_point)
+    used_type = "adjusted_close" if (base_adjusted and target_adjusted) else "close"
+    result_kwargs["price_type_used"] = used_type
+    # Record on the points too, so the acquisition provenance and the actual
+    # choice travel together through the input snapshot.
+    for point in (base_point, target_point):
+        if point is not None and not point.used_price_type:
+            point.used_price_type = used_type
 
     if require_total_return and not (base_adjusted and target_adjusted):
         return AssetReturnResult(
@@ -291,8 +383,9 @@ def priced_return(
             **result_kwargs,
         )
 
+    status = local_status if local_status is not ReturnStatus.OK else fx_outcome.status
     return AssetReturnResult(
-        status=ReturnStatus.OK,
+        status=status,
         local_return=local_return,
         fx_return=fx_outcome.fx_return,
         return_cny=cny_return(local_return, fx_outcome.fx_return or 0.0),
@@ -310,5 +403,6 @@ __all__ = [
     "cny_return",
     "convert_to_cny",
     "priced_return",
+    "resolve_currency",
     "series_from_frame",
 ]

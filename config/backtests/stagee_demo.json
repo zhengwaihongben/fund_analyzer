@@ -1,0 +1,13 @@
+{
+  "spec_id": "stagee-cli-demo",
+  "universe": [
+    {"ticker": "ABBV", "market": "US", "currency": "USD"},
+    {"ticker": "AMGN", "market": "US", "currency": "USD"}
+  ],
+  "weighting": "equal",
+  "start": "2026-11-04",
+  "end": "2026-11-17",
+  "initial_capital": 100000.0,
+  "rebalance": {"frequency": "monthly", "anchor": 4},
+  "drift_threshold": 0.0
+}

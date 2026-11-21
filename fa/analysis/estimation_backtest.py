@@ -23,10 +23,11 @@ from fa.utils.logging_setup import get_logger
 log = get_logger(__name__)
 
 HISTORY_COLUMNS = [
-    "computed_at", "target_nav_date", "base_nav_date", "base_nav",
+    "run_id", "computed_at", "target_nav_date", "base_nav_date", "base_nav",
     "estimated_nav", "estimated_return", "coverage_ratio", "uncovered_weight",
     "holdings_quarter", "holdings_date", "disclosure_date",
-    "disclosure_date_estimated", "look_ahead_safe", "holdings_source", "status",
+    "disclosure_date_estimated", "look_ahead_safe", "look_ahead_status",
+    "holdings_source", "data_quality", "status",
     "official_nav", "error", "abs_error",
 ]
 

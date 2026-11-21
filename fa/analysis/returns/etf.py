@@ -49,13 +49,13 @@ class EtfReturnCalculator:
 
         declared = normalise_currency(asset.currency)
         quoted = normalise_currency(prices.currency) if prices is not None else ""
-        if declared and quoted and declared != quoted:
-            result.warnings.append(
-                f"ETF 宣告幣種 {declared} 與行情幣種 {quoted} 不一致，以行情為準"
-            )
         if not declared and quoted:
             result.currency = quoted
-        exchange = asset.exchange or (prices.market if prices is not None else "")
+        exchange = (
+            asset.exchange
+            or asset.market
+            or (prices.market if prices is not None else "")
+        )
         if not exchange:
             result.warnings.append("未識別 ETF 交易所，交易日曆退回週末規則")
         return result

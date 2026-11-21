@@ -31,7 +31,7 @@ I currently invest the funds by Alipay(支付宝), but most funds on it do not p
 - **Fast, dependency-light NAV fetch** — NAV history is read straight from the `pingzhongdata` blob (one HTTP request, `re` + `json`), with AKShare as fallback; no JS engine is instantiated
 - **Resilient downloads** — holdings are retried 3× per year with 2 s / 4 s backoff, and a socket-level timeout (`FA_REQUEST_TIMEOUT`) bounds hosts that stall mid-handshake
 - **Unified Logging** — Console + rotating log file, GUI log pane fed through a queue, single crash-report path (`crash.log`), plus `fatal.log` (faulthandler) for native aborts that never reach Python
-- **Test suite** — 113 stdlib `unittest` tests covering config, data layer, indicators, risk metrics, QDII estimation, point-in-time holdings, the pipeline and the GUI lifecycle
+- **Test suite** — 1131 stdlib `unittest` tests covering config, data layer, indicators, risk metrics, QDII estimation, point-in-time holdings, FX persistence/PIT, price PIT and revision reconstruction, the backtest model/access layer, the engine and costs, the metrics, runner and benchmark, the pipeline, the estimator's FX wiring and the GUI lifecycle, the Stage C service (`fa/application/backtesting.py`), the backtest form conversion and the persisted-run panels, the Stage D report renderers (backtest + estimation) and the read-only history query, and the report-centre window
 
 > There is **no** built-in scheduled alert script in this repository. Use your OS scheduler (e.g. Windows Task Scheduler) to run the CLI if you want periodic alerts.
 
@@ -85,7 +85,7 @@ fund_analyzer/
 │       ├── qdii_estimate.py    # QDII estimate window (estimated vs official NAV, coverage, contributions)
 │       ├── post_market.py      # post-market monitor window (60 s refresh, single instance)
 │       └── crash.py            # one crash path: log → crash.log → messagebox
-├── tests/                      # stdlib unittest suite (no pytest needed)
+├── tests/                      # test suite (stdlib unittest; `pytest -q` also works)
 │   ├── test_utils.py           # config merging, quarters, tickers, cache TTL, socket timeout
 │   ├── test_data.py            # pingzhongdata parsing, holdings retry/backoff
 │   ├── test_analysis.py        # indicators (incl. warm-up), downside deviation, Sortino, IR alignment
@@ -98,6 +98,7 @@ fund_analyzer/
 │   ├── test_shapley.py         # local + FX == CNY contribution, portfolio identity
 │   ├── test_qdii.py            # calendar, valuation dates, holding returns, FX, estimator, backtest
 │   ├── test_nav_estimator_v2.py    # orchestrated flow end-to-end, no network, DB persistence
+│   ├── test_quality_wiring.py      # stale prices / FX / assumption-rate cash reaching quality
 │   ├── test_pipeline.py        # end-to-end pipeline with network calls stubbed
 │   └── test_gui.py             # log queue, crash handler, shutdown(), post-market window reuse
 ├── install.bat / install.sh    # create .venv and install requirements
@@ -124,6 +125,33 @@ Files created at runtime (not in git):
 | `crash.log` | Python traceback of uncaught exceptions / Tk callback errors |
 | `fatal.log` | `faulthandler` dump of all threads when a native library aborts the process |
 | `python_path.txt` | Optional: first line overrides the interpreter used by `launch.vbs` |
+
+## Project layout and packaging
+
+Everything in the working tree belongs to one of three categories:
+
+| Category | Examples | In git | In archives |
+| :--- | :--- | :--- | :--- |
+| Source, tests, docs | `fa/`, `tests/`, `docs/`, `scripts/`, `pytest.ini` | yes | both |
+| Project data | `data/database/fund_analyzer.db` (live DB), `docs/development/v2.2.3_baseline/` (frozen fixture) | live DB no, baseline yes | live DB never, baseline always |
+| Runtime artefacts | `__pycache__/`, `*.pyc`, `.pytest_cache/`, `_tmp/`, `_pytmp/`, `pytest-cache-files-*/`, `output/`, `*.log` | no | no |
+
+Two scripts keep that boundary:
+
+```bash
+python scripts/clean_runtime_files.py            # list what would be removed
+python scripts/clean_runtime_files.py --apply    # remove caches and scratch directories
+
+python scripts/package_project.py --mode full    # → dist/fund_analyzer_full.zip
+python scripts/package_project.py --mode review  # → dist/fund_analyzer_review.zip
+```
+
+- **`full`** (備份／移交／部署) — the whole project except caches, scratch directories, the live database and logs; generated `output/` is included.
+- **`review`** (程式碼審查) — only `fa/`, `tests/`, `docs/`, `scripts/`, `pytest.ini`, `README.md` and `.gitignore`.
+
+Both archives are deterministic (sorted entries, fixed timestamps) and the packaging script refuses to finish if an archive still contains a cache, scratch directory, log, or any database other than the frozen `docs/development/v2.2.3_baseline/database_backup.db` — that one is a migration-test fixture and must travel with `docs/`.
+
+`data/` is kept as an empty skeleton (`cache/`, `database/`, `exports/{backtests,estimations,holdings}/` with `.gitkeep` files), so a fresh clone has the directories the code expects. A few directories left behind by an earlier sandboxed test run are ACL-locked and cannot be deleted from a normal shell (`_tmp/`, `_pytmp/`, `pytest-cache-files-*`); they are ignored by git and excluded from both archives, and an elevated PowerShell can remove them if they ever get in the way.
 
 ## Configuration
 
@@ -349,15 +377,18 @@ The trade date is resolved in **Asia/Shanghai**: before 15:00 the trade date is 
 | `coverage_of_known` | The same sum divided by the disclosed weights (i.e. coverage of the known portfolio) |
 | `uncovered_weight` | `1 − coverage_ratio`: the share treated as a 0 % return, reported explicitly because it is unknown, not zero |
 | `local_contribution` / `fx_contribution` | Shapley attribution of the estimate: `C_local = w·r_local(1+r_fx/2)`, `C_fx = w·r_fx(1+r_local/2)`; the two add up to `estimated_return` exactly |
+| `run_id` | Identity of this run; the estimate JSON, the history CSV row and the stored input snapshot all share it, so two runs for the same target date never overwrite each other |
+| `look_ahead_status` | `verified-safe` (filing date known and before the target), `estimated-disclosure` (the filing date is still the quarter-end + 21-day estimate), `unsafe`, `unknown`; `look_ahead_safe` is true only for `verified-safe` |
 | `holdings_quarter` / `holdings_date` / `disclosure_date` / `disclosure_date_estimated` | The quarter actually used, its quarter end, the filing date assumed for it (quarter end + 21 days, marked as **estimated** rather than fact) |
-| `look_ahead_safe` / `quarters_available` | The estimate only used a portfolio disclosed on or before the target date; the quarters that exist locally (cache + database) |
+| `quarters_available` | The quarters that exist locally (cache + database) |
 | `holdings_source` | Where the weights came from: `eastmoney-page` (latest quarter top-10 from the fund home page), `database` (SQLite snapshot), `cache` (fresh snapshot) or `cache-stale` (older snapshot reused because every online source failed) |
 | `holdings_scope` | `top10` (Eastmoney publishes only the top ten, the normal case) or `full_portfolio` |
 | `history_available` | Whether more than one quarter exists locally, i.e. whether a date-specific estimate has anything older to fall back on |
 | `market_data_date` | Latest date actually present in the price data |
-| `holdings[]` | Per holding: weight, currency, market, local return, FX return, CNY return, **Shapley** contribution, price/FX dates, status, notes |
+| `holdings[]` | Per holding: weight, currency, market, local return, FX return, CNY return, **Shapley** contribution, `price_type_used`, price/FX dates, status, notes |
 | `model_version` | `2.2.0` — the V2 estimation model that produced the record |
-| `data_quality` / `quality_score` | `high` (≥85) / `medium` (≥60) / `low` and the 0–100 score: stale prices, excluded weight, low coverage and an estimated disclosure date each cost points |
+| `data_quality` / `quality_score` / `quality` | `high` (≥85) / `medium` (≥60) / `low` and the 0–100 score; `quality` is the full report (stale weight, excluded weight, assumption-rate weight, calendar fallback, reasons) |
+| `inputs` | Complete per-run input snapshot: base/target prices with dates and `price_type_used`, FX rates with dates, calendar (and whether it fell back to weekends), cash rate/source/days, config and model version |
 | `warnings[]` | Missing prices, stale data, stale portfolio, uncovered weight, etc. |
 
 Rules the implementation follows:
@@ -365,10 +396,11 @@ Rules the implementation follows:
 - **No look-ahead bias.** Only quarters whose disclosure date is on or before the target date may be used (`fa/data/qdii_holdings.py::select_point_in_time`); if no locally available quarter qualifies the estimate is refused (`insufficient-data`) rather than computed from future information. The tool does **not** download historical quarters automatically any more — older quarters have to come from SQLite (imported or saved by earlier runs).
 - **No fabricated data.** A holding without a usable price or FX rate is excluded from both the return and the coverage ratio (status `missing-price`, `missing-target-price`, `missing-base-price`, `stale-price`, `stale-base-price`, `missing-fx`, `stale-fx`, `stale-base-fx`, `missing-currency`); it is never treated as a 0 % return.
 - **Both endpoints of the interval must be fresh.** Staleness is checked on the target **and** the base observation, for prices and for FX, so a base quote from three weeks ago cannot be silently compared with a NAV two days ago.
-- **Unknown currency is not CNY.** An empty/unrecognised currency yields `missing-currency` and is excluded; only `CNY`/`RMB` skip the FX leg.
+- **Unknown currency is not CNY.** An empty/unrecognised currency yields `missing-currency` and is excluded; only `CNY`/`RMB` skip the FX leg. A `FxSeries` must declare its `base_currency`: a foreign base is rejected (`匯率基準貨幣 … 並非 CNY`) and so is a missing declaration (`匯率序列缺少基準貨幣聲明`) — an EUR-per-USD series must never be consumed as CNY-per-USD, and an unlabelled series is not silently assumed to be CNY either (`from_pairs()` / the SQLite loader declare `CNY` explicitly).
+- **Asset types come from the source, not from the ticker.** A symbol that merely looks like a stock code stays `unknown` (excluded, weight retained) unless a manual override, the data source, or the formal name says what it is; the QDII builder declares `equity` only because the Eastmoney table is 「股票投资明细」. Adding a REIT or commodity ETF later must not need a change to the portfolio maths.
 - **Coverage is never hidden.** An estimate covering 46 % of the fund is labelled `partial`, never `estimated`, and the uncovered share is printed (`未覆蓋 53.9% 的資產按 0% 回報處理`).
 - **The estimate never overwrites the official series.** It is written to its own JSON, plus one row per run in `_qdii_estimates.csv`, which keeps the official NAV (once published) next to the estimate so the error can be scored later.
-- **Inputs are reproducible.** Besides the summary record, the complete input snapshot of every estimate (per-holding prices, FX rates, the dates they were quoted on, the portfolio selection) is merged into `<fund_code>_qdii_estimate_inputs.json`, keyed by `target_nav_date`, so an old estimate can be replayed and its error traced to one holding. Later runs never overwrite earlier snapshots.
+- **Inputs are reproducible.** Besides the summary record, the complete input snapshot of every estimate (per-holding prices, FX rates, the dates they were quoted on, the portfolio selection) is merged into `<fund_code>_qdii_estimate_inputs.json`, keyed by `run_id`, so an old estimate can be replayed and its error traced to one holding. Two estimates for the same target date are two runs, and both are kept.
 
 **Backtest.** `--qdii-backtest` reconciles every stored estimate with the official NAV as soon as it is published and reports `MAE`, `RMSE`, `Mean Error`, `Max Abs Error` and the mean coverage:
 
@@ -404,6 +436,21 @@ Every fetched quarter is merged into the local CSV cache and written to SQLite, 
 | `FA_STALE_SESSIONS_EXCLUDE` | `3` | Stale sessions at/above this value are excluded from the return and coverage |
 | `FA_STALE_SESSIONS_MAX` | `10` | Absolute cap: beyond it the quote counts as missing, not stale |
 | `FA_CASH_ASSUMPTION_RATE` | `0.0` | Annual rate used when a cash holding declares none (warning is emitted) |
+| `FA_FX_PIPELINE` | `1` | Use the persisted point-in-time FX pipeline for QDII estimates (`0`/`false`/`no`/`off` falls back to the legacy download path, which has no PIT guarantee) |
+| `FA_FX_TIMEZONE` | `Europe/London` | Timezone whose calendar day a Yahoo FX bar belongs to |
+| `FA_FX_AVAILABILITY_LAG_MINUTES` | `30` | Minutes after the next London midnight when a bar is treated as published |
+| `FA_PRICE_AVAILABILITY_LAG_MINUTES` | `30` | Minutes after a session close when its daily bar is treated as published |
+| `FA_PRICE_OVERLAP_SESSIONS` | `5` | Trading days re-downloaded before the last stored price when updating |
+| `FA_PRICE_OVERLAP_CALENDAR_DAYS` | `12` | Calendar-day floor for that overlap (whichever reaches further back wins) |
+| `FA_BACKTEST_COMMISSION_BPS` | `5` | Commission in basis points of the gross notional (the spec's own `CostModel` wins when it is set) |
+| `FA_BACKTEST_MIN_COMMISSION` | `0.0` | Minimum commission per order in CNY |
+| `FA_BACKTEST_SLIPPAGE_BPS` | `10` | Adverse slippage in basis points, recorded as a cost rather than folded into the fill price |
+| `FA_BACKTEST_FX_SPREAD_BPS` | `20` | FX spread in basis points on a non-CNY conversion leg |
+| `FA_BACKTEST_RISK_FREE_RATE` | `0.02` | Annual risk-free rate used by Sharpe and Sortino |
+| `FA_BACKTEST_DECISION_LAG_MINUTES` | `30` | Minutes after the session close at which the strategy may look at that close |
+| `FA_BACKTEST_EXECUTION_LAG_SESSIONS` | `1` | Sessions between the decision and the executed fill |
+| `FA_BACKTEST_FRACTIONAL_SHARES` | `1` | Allow 6-dp fractional quantities (`0` = whole shares) |
+| `FA_PRICE_DEFAULT_YEARS` | `2` | Default history length for a first price download |
 
 ### Log files
 
@@ -439,15 +486,63 @@ V2 keeps a local SQLite database at `data/database/fund_analyzer.db` (override w
 
 The QDII pipeline uses it in both directions: each fetched quarter is written on the way in (so a later run can rebuild point-in-time holdings offline, reported as `holdings_source: "database"`), and every estimate is stored with its `run_id` on the way out. If the database cannot be opened the analysis still runs from files only — the database is a durability layer, not a dependency.
 
+## Backtesting (V2.3.2)
+
+A point-in-time portfolio backtest runs through the stored SQLite prices with
+execution at the next session's close (+30 min availability lag) and records
+runs, metrics, trades and the equity curve in `strategy_backtest_*`.
+
+```bash
+# submit a specification (see config/backtests/stagee_demo.json)
+python scripts/backtest_report.py run --spec config/backtests/stagee_demo.json
+# list stored runs, then render one report from the database
+python scripts/backtest_report.py list
+python scripts/backtest_report.py show <run_id>
+```
+
+Reports are written to `output/reports/<run_id>.md` and contain only values read
+back from the database, so a report is traceable to its run. Acceptance helpers:
+
+* `python scripts/accept_backtest_synthetic.py` — hand-checked scenarios on a
+  throwaway database (writes `docs/development/stageE_synthetic_acceptance.md`).
+* `python scripts/audit_working_db.py` — read-only audit of the working database.
+* `python scripts/smoke_backtest_real.py` — short real-data run (writes
+  `docs/development/stageE_real_smoke.md`).
+* `python scripts/audit_backtest_retention.py` — integrity audit, no pruning.
+* `python scripts/coverage_core.py` — stdlib statement coverage of the core
+  modules (the `coverage` package is not a dependency).
+
+*Initial Stage E delivery, before Round 8 fixes:* the gate was not met — the
+tracer reported 88.2 %, with `fa/analysis/returns/base.py`,
+`fa/analysis/returns/fx.py` and `fa/analysis/nav_estimator.py` below the
+threshold. After the Round 8 coverage work the gate is met (see below). Stage D
+was accepted in Round 9; Stage E is delivered but pending independent
+acceptance.
+
 ## Tests
 
-The suite uses the standard library only (`unittest`, no `pytest` needed):
+The suite is written against the standard library (`unittest`) and also runs under `pytest`:
 
 ```bash
 python -m unittest discover -s tests -t .
+python -m pytest -q          # 兩者皆可；pytest.ini 已把收集範圍限定在 tests/
 ```
 
-Currently 266 tests. Coverage by file: `test_utils.py` — config merging, quarter labelling, ticker normalisation, cache TTL/pruning, socket timeout; `test_data.py` — `pingzhongdata` NAV parsing, holdings retry/backoff, fund-home-page holdings parsing and the page/stale-snapshot fallbacks; `test_analysis.py` — indicators (warm-up and the absence of ATR/ADX), downside deviation / Sortino against hand-computed values, IR alignment on common dates; `test_qdii.py` — China calendar and 15:00 cutoff, valuation-date resolution, point-in-time portfolio selection, per-holding returns with target/base staleness, unknown-currency rejection, coverage aggregation and local/FX/interaction attribution, Yahoo symbol/currency mapping, FX series, portfolio fallback order, the estimator and its input snapshot, and the backtest metrics; `test_pipeline.py` — the end-to-end pipeline with network calls stubbed, cache survival, output pruning, error path, QDII estimate wiring; `test_gui.py` — log queue, crash handler, `shutdown()`, post-market window reuse and close.
+Verified environments:
+
+- Python 3.10 — `python -m unittest discover -s tests -t .` → 1131 tests, `OK` (130 s)
+- Python 3.11.16 (Anaconda `quant-finance`) + pytest 9.2.0 — `python -m pytest -q` → `510 passed, 35 subtests passed, 1 failed in 46.19s` (measured while the suite had 511 tests; the newer `test_price_pit.py` cases were not re-run under that interpreter yet); the single failure is `test_gui.py::…test_analysis_result_is_marshalled_to_main_thread`, where Tk cannot be created a second time inside pytest on that build (`_tkinter.TclError: invalid command name "tcl_findLibrary"`) — the same test passes under `unittest` on 3.10 and the GUI code is unaffected
+- `python -m compileall -q fa fund_analyzer.py fund_analyzer_gui.py` passes
+
+在受限沙箱下，conda 直譯器需要在專案目錄寫入暫存檔，第一次執行可能因權限被拒絕（`PermissionError`）；一般使用者的 conda 環境不受此限。
+
+Note: the suite requires the project dependencies to be installed (see [Requirements](#requirements)). Test modules that import `akshare` — `test_data.py`, `test_qdii.py`, `test_pipeline.py` — cannot be imported when it is missing, so a bare interpreter will report import errors rather than test failures. `requirements.txt` pins the versions this project was verified against; install it into the project `.venv` with `install.bat` / `install.sh`.
+
+Currently 1131 tests. Coverage by file: `test_application_estimation.py` — the estimation application service against a real temporary SQLite database: live runs pass a Repository into the estimator and verify persistence by reading the run back, a failed write is reported as `persisted=False` instead of looking saved, stored runs never call the estimator or write, asset detail resolves SQLite inputs → per-run JSON snapshot → latest JSON only when the `run_id` matches with the source label exposed, missing weight/contribution stay `—` (never 0), numeric fields reject NaN/±infinity instead of passing them through, and the canonical `cny_return`/legacy `return_cny` spellings both resolve, unknown runs raise `LookupError`, and history filtering/limit clamping match the Repository; `test_gui_startup.py` — the GUI entry stays cheap to import (no pandas/matplotlib) and only the analysis tab is built at startup; `test_gui_estimation_view.py` — the QDII view's pure presentation layer (13 summary fields with `—` for missing values, spec-ordered asset columns, status text instead of numbers for non-`ok` rows, quarter/scope/disclosure and source labels in the quality block, history rows in service order) plus the window modes through `WorkerBridge` (handover never calls the service, a stored `LookupError` is a message not a traceback, live `persisted` text comes only from the view, a late result is dropped after close) and a real-SQLite read-only browsing check that row counts and both JSON files are unchanged, `test_gui_lifecycle.py` — four-area notebook, window registry with a shared close budget, shutdown closing registered children, the fake-scheduler post-market contract and the QDII/post-market thread-isolation checks, `test_gui_worker.py` — one terminal result per task, progress ordering, late-message dropping after close, live-thread widget isolation (`_target`/`__self__`/`__closure__`/args) and the 2 s close clamp, `test_gui_formatting.py` — signed percentages, one-decimal coverage, `—` for missing values and colour never carrying the only signal, `test_backtest_data_access.py` — PIT-only price reads (a legacy row without `available_at` is invisible, `Repository.load_prices` is never called), per-point venue and quote-currency guards (an empty or mixed market/currency is rejected, `NYQ` and `US` still compare equal, `Instrument.market` is mandatory), FX publication gating with `rate_on_or_before()` falling back to an earlier session (`fx_rate()` on a holiday returns the last public rate, never an unpublished one, and CNY needs no series), `revision_id` identity carried out of `prices_as_of()`, and the isolation checks (a subprocess import of `fa.backtesting` loads none of `requests`/`yfinance`/`akshare`; an AST scan forbids `sqlite3`, `execute*` and `load_prices` inside the package); `test_backtest_costs.py` — commission, adverse slippage and FX spread against hand formulas (5 bps with no floor, a 2.0 minimum, 10 bps slippage in both directions, 20 bps on a foreign conversion, zero for CNY), half-even rounding at 2 dp and 6 dp, and rejection of negative/NaN/infinite notional; `test_backtest_engine.py` — a fill at the official close even when `adj_close` differs (and the post-trade mark still uses `adj_close`), a foreign dividend credited only when its FX rate is published (never at a silent 1:1), a venue closed inside the union grid skipping its orders without a `missing-price` anomaly while a real gap still raises one, the hand-computed two-asset case at 1e-9 (zero costs) and its accounting identity with costs, equal/fixed/momentum weights (the positive-part normalisation and cash when every score is non-positive), the four rebalance frequencies and the drift threshold, sells before buys, cash-constrained scaling without a negative balance, whole-share mode, a missing price or FX skipping only what it must, dividends and splits on a raw close series, the equity curve and drawdown, and determinism; `test_backtest_pit.py` — a price published one microsecond after the decision instant is invisible, an execution price published late is never substituted, two databases differing only in an unpublished close produce identical trades and equity curves (while publishing it changes the run), a revision does not change decisions made before it, and legacy rows without `available_at` are never used; `test_backtest_models.py` — `StrategySpec` validation (required `initial_capital`, CNY-only base, unique universe, fixed weights summing to 1, momentum window floor, anchor ranges), NaN/Infinity rejection on every numeric field, immutable weights, long-only positions/cash, and `BacktestMetrics` reporting `None` rather than `0` for an undefined ratio; `test_price_pit.py` — the price provider's vendor-stamp conversion (US opening bell, venues east of UTC), window/duplicate/corruption handling, the window-edge cache that also demands publication metadata, the download plan giving an older evidence gap priority over the overlap rule, legacy rows without availability being re-downloaded instead of trusted, per-date canonical completeness (a superseded `unknown` duplicate no longer forces a download), the five-session overlap, validation that never inverts a quote, revision rows that keep the stored version and push the new availability to the revision instant, `prices_as_of()` boundaries compared in Python at full datetime precision (visible exactly at `available_at`, not one microsecond earlier, the old version still visible one microsecond before `replaced_at` and gone at it, identical for every timezone), the `start`/`end` window pushed into both UNION branches (inclusive edges, a same-date revision still resolved by instant, a revision outside the range never leaking) and the execution instant at close + 30 min; `test_fx_integration.py` — the estimator's FX switch and point-in-time reads (an unpublished bar is excluded and counted, the same bar appears once published, a pipeline failure never downgrades to non-PIT rates, `DatabaseError` falls back to the legacy download path, and the switch/CNY/no-repository paths report the right `fx_source`); `test_fx_pipeline.py` — cache-window completeness (edges, not the newest date, plus legacy rows whose publication time is missing are enriched from the stored dates instead of being mistaken for a usable cache), the five-session/five-trading-day overlap, per-bar validation, availability stamping, PIT boundaries and multi-currency isolation; `test_fx_provider.py` — London trading-date mapping at the GMT/BST boundaries, the EU-rule offset fallback against `ZoneInfo` for every day 2025–2030, bar parsing with range/duplicate/corruption handling, direction suspicion without transformation, CNY and unsupported-currency no-ops, every HTTP failure path, the facade's unchanged signatures, and `fx_series_map_from_fetch()` provenance; `test_fx_repository.py` — FX bars keep their full time provenance through a database round trip, an identical re-download creates no revision, a materially different rate is ledged with the *stored* row's own timestamps, within-tolerance and enrichment-only writes stay out of the ledger, a vendor-dropped date is never deleted, and `fx_as_of()` honours every publication boundary while `load_fx()` still sees legacy rows; `test_time_model.py` — tz-aware timestamps, the three time fields, availability provenance and DST at the New York close; `test_migration_002.py` — upgrade on a copy of the frozen V2.2.3 baseline (row preservation, conservative `look_ahead_status` back-fill, interrupted-migration rollback, re-run), plus the V2.2 read paths against a version-2 database; `test_migration_003.py` — the `fx_revisions` ledger on the same frozen baseline (2 → 3, documented columns and indexes, empty ledger, untouched row counts/price/nav data, exactly one new table, idempotent re-run, injected-failure rollback, byte-identical baseline); `test_backtest_metrics.py` — every §7 ratio against a hand formula (CAGR, annualised volatility, Sharpe with a daily risk-free rate, downside-deviation Sortino, maximum drawdown, Calmar, turnover, FIFO hit rate, exposure, cost drag), `None` instead of `0` when a ratio is undefined, and an empty curve rejected; `test_backtest_runner.py` — the full persistence round trip (run, metrics, trades with `seq`, equity curve), canonical spec ordering, `run_id` composition with `initial_capital`, idempotent second call, `force=True` producing a `-N` suffix, a capital change producing a new run, naive `now` rejected, and a failed write leaving zero runs; `test_backtest_fingerprint.py` — a revision moves the content digest while the row count, date range and `max(fetched_at)` stay equal, the digest is built **per decision instant** and uses a conservative session-price superset for every open venue session, while a MOMENTUM strategy additionally hashes the exact last `window + 1` observations consumed by the engine on each rebalance day, including closed venues (the shared `is_rebalance_day()` helper keeps engine and fingerprint in step; pre-run-start bars are excluded from FIXED/EQUAL inputs, but remain included for MOMENTUM when they fall within a consumed `window + 1` observation tail) (a correction published later leaves every earlier session's digest identical while the post-publication window changes), the FX input is the rate the engine actually consumed (`data_access.fx_rate()` plus its observation date, so an older observation that still prices the session is hashed instead of reported missing, and the same rate on a different date is distinguishable), the momentum window is taken per venue (a sparse Hong Kong series keeps its whole window while a dense US bar older than every window stays out), a plain re-download that only refreshes `fetched_at` leaves the digest unchanged, a new run after a published revision gets a new id, identical data reuses the stored run, and two databases with different histories hash differently; `test_backtest_execution_instant.py` — the execution bar is invisible at the close, visible at close + 30 min, the recorded fill is the official close with `price_source="close"`, and a late publication is never substituted; `test_backtest_benchmark.py` — the benchmark read through the same PIT path **session by session at that session's own decision instant** (a bar published later cannot fill an earlier point, a late FX rate cannot convert it, a shut venue carries, an open venue without data is empty plus `benchmark-missing-price`/`benchmark-missing-fx`) and its consumed prices (with the price actually used and `price_source`) and per-session FX rates joining the content fingerprint (a revised GBP/CNY moves the digest even for a USD-only strategy); `test_backtest_run_identity.py` — a dividend-only and a split-only correction changing the post-publication window's digest while every earlier session's digest stays identical, anomalies surviving a cache hit and a reload, and changed execution settings or a changed `FA_BACKTEST_COMMISSION_BPS` producing a new run (an explicit `CostModel`, even the default-valued one, still winning through the `COST_MODEL_DEFAULT` sentinel); `test_backtest_data_integrity.py` — venue flips, empty venues, currency mismatches and a non-CNY FX base aborting `prices()`, `run_engine()` and `data_fingerprint()` while a genuine hole stays `BacktestDataMissingError`; `test_migration_004.py` — the four backtest tables on the frozen baseline (3 → 4, documented columns and index, untouched legacy rows, idempotent re-run, injected-failure rollback, fresh database, additive-only SQL); `test_database.py` — schema creation, point-in-time snapshot queries, price upsert semantics (legacy time columns kept, `dividend`/`split` revisions only when the stored value really changes, enrichment columns never wiped by an empty value), FX base-currency rejection, estimation runs and backtest rows; `test_utils.py` — config merging, quarter labelling, ticker normalisation, cache TTL/pruning, socket timeout; `test_data.py` — `pingzhongdata` NAV parsing, holdings retry/backoff, fund-home-page holdings parsing and the page/stale-snapshot fallbacks; `test_analysis.py` — indicators (warm-up and the absence of ATR/ADX), downside deviation / Sortino against hand-computed values, IR alignment on common dates; `test_qdii.py` — China calendar and 15:00 cutoff, valuation-date resolution, point-in-time portfolio selection, per-holding returns with target/base staleness, unknown-currency rejection, coverage aggregation and local/FX/interaction attribution, Yahoo symbol/currency mapping, FX series, portfolio fallback order, the estimator and its input snapshot, one-row-per-`run_id` history and the backtest metrics; `test_quality_wiring.py` — stale prices reaching the quality grade (2 sessions kept, 3 excluded), stale FX, assumption-rate cash, unknown assets and asset classification (source-declared types only, no ticker-shape guessing); `test_pipeline.py` — the end-to-end pipeline with network calls stubbed, cache survival, output pruning, error path, QDII estimate wiring; `test_gui.py` — log queue, crash handler, `shutdown()`, post-market window reuse and close.
+
+Additional suites added while closing the Stage E coverage gate: `test_returns_coverage_paths.py` — the uncovered `returns/base.py` and `returns/fx.py` diagnostics (`series_from_frame()` on empty/columnless/unparsable rows, NaN close falling back to `adj_close`, the `MISSING_FX`/`STALE_BASE_FX`/`MISSING_TARGET_PRICE`/`STALE_BASE_PRICE`/`UNSUPPORTED_ASSET` conversions); `test_nav_estimator_coverage_paths.py` — the estimator's database, FX and holdings failure paths (a PIT read failure drops only that currency, a `DatabaseError` falls back to the legacy download, an unpublished currency is counted, stale-snapshot and old-disclosure warnings, a cache-first `_market_data()`); `test_core_coverage_edges.py` — a USD cash holding without FX, an unknown return status graded as unsupported, the `base_nav_fresh` and `calendar_fallback` penalties, and `renormalised_error()` without an estimate; `test_returns_calculator_guards.py` — each concrete calculator rejecting a non-`Asset` input.
+
+Coverage is measured with `python scripts/coverage_core.py` (stdlib `sys.settrace`, because `coverage.py` is not a dependency): every documented core module is above the 90 % threshold and the total is **99.4 %** (704/708). The measurement counts every executable statement — module-level, class-body and function-body, docstrings excluded — which is what `sys.settrace` can observe because it is installed before `unittest` discovery. The per-module table, the missing line numbers and the explanation of the four remaining defensive lines are in `docs/development/stageE_coverage.md` and spec §19.4.
 
 ## Troubleshooting
 

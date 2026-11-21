@@ -181,3 +181,70 @@ Concrete rules implemented in code:
 * **Every status name is shared** by all calculators (`ReturnStatus`), so the
   portfolio layer never branches on asset class.
 
+## 11. Status semantics added by the V2.2.1 review
+
+Two questions are kept apart: `status.is_ok` means "nothing to report", while
+`status.is_usable` means "the number may be used, though the data is slightly
+stale". Coverage, `contribution`, `value_portfolio()` and `assess_quality()`
+all gate on `is_usable` — a 1–2 session stale price keeps its weight but lowers
+the quality score, while a 3+ session stale price is excluded and shows up as
+uncovered weight.
+
+| Status | Meaning | Usable |
+|---|---|---|
+| `ok` | exact data on both dates | yes |
+| `stale-price` / `stale-base-price` | kept, session lag within the warn band | yes |
+| `stale-fx` / `stale-base-fx` | FX kept, session lag within the warn band | yes |
+| `missing-price`, `missing-target-price`, `missing-base-price` | no usable observation | no |
+| `missing-currency` | the currency is unknown, so no FX leg can be formed | no |
+| `currency-mismatch` | declared currency ≠ quote currency | no |
+| `missing-fx` | FX series absent, zero, stale beyond the cap, or for another currency | no |
+| `unsupported-asset` | no calculator for this asset class (or a bond ETF without a total-return series) | no |
+| `invalid-input` | the input itself is broken (e.g. a non-positive cash holding period) | no |
+
+**Currency consistency.** The currency used for the FX leg is resolved once
+(`resolve_currency`): the declared currency wins, the quote currency fills a
+blank. When both are known and differ, the asset is rejected with
+`currency-mismatch` (`宣告幣種 X 與行情幣種 Y 不一致，拒絕換算`) instead of being
+converted through the wrong pair. A `FxSeries` whose `currency` differs from the
+asset currency is likewise rejected (`匯率序列貨幣 … 與資產貨幣 … 不一致`).
+
+**Recorded price type.** Each result carries `price_type_used`
+(`adjusted_close` or `close`). The provenance is split in two on the price point:
+`available_price_type` records what the source offered (for example
+`close+adj_close`) and `used_price_type` records what the calculator took. The
+input snapshot stores both, together with the price values and dates actually
+used, so a later reader can tell "the vendor only had a raw close" apart from
+"the vendor had an adjusted close and we chose the raw one".
+
+## 12. V2.2.2 reliability patch
+
+**FX quote convention.** A `FxSeries` carries `currency` (the numerator) and
+`base_currency` (the denominator). `convert_to_cny()` rejects a series whose
+`base_currency` is not `CNY` (`匯率基準貨幣 … 並非 CNY，拒絕換算`) with
+`missing-fx`: an `EUR`-per-`USD` series used as `CNY`-per-`USD` would produce a
+plausible-looking but entirely different number.
+
+Since V2.2.3 the denominator is **not** defaulted: the dataclass field is empty
+unless the caller declares it, and an empty base is rejected with
+`匯率序列缺少基準貨幣聲明（應為 CNY），拒絕換算`. Trusted internal sources stay
+convenient — `FxSeries.from_pairs()` defaults to `CNY`, and the SQLite loader
+passes `base_currency="CNY"` explicitly because `fx_rates` is defined as a
+CNY-based table. An externally supplied series can therefore never be silently
+assumed to be CNY-denominated.
+
+**Cash propagates its FX status.** `CashReturnCalculator` returns
+`fx_outcome.status` instead of a blanket `OK`, so a stale FX leg on a foreign
+currency cash balance reaches `stale_weight` in the quality report. The return
+itself is still produced (stale-but-usable), which is why `is_usable` — not
+`is_ok` — gates inclusion.
+
+**Price-type provenance is derived, not assumed.** `series_from_frame()` reads
+the frame's own columns: `Close` only → `close`; `Close` plus
+`AdjClose`/`Price` → `close+adj_close`. A fixed default (`adjusted_close`) would
+claim the vendor supplied an adjusted close even when it did not.
+
+**Asset types come from declarations.** See § 1 of `01_asset_data_models.md`: no
+ticker-shape heuristic, and the QDII builder declares `equity` from the source
+table label 「股票投资明细」.
+

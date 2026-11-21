@@ -141,3 +141,7 @@ layout is incremental (see `07_development_roadmap.md`).
 | `05_module_interfaces.md` | module I/O, error taxonomy, orchestration |
 | `06_testing_and_acceptance.md` | test layers, cases, coverage, acceptance |
 | `07_development_roadmap.md` | phases V2.0–V2.4 and dependencies |
+| `08_v231_data_foundation.md` | V2.3.1 data foundation: time model, migration 002, PIT rules, pipelines, acceptance |
+| `09_v231_stage2_fx_pipeline.md` | V2.3.1 stage 2: FX time convention, `fx_revisions` + migration 003, provider/pipeline/PIT contracts, FX-01…FX-12 |
+| `10_v232_backtest_engine.md` | V2.3.2 backtest engine: models, PIT data access, costs, engine, metrics, runner, migration 004, acceptance A–E |
+| `11_v24_gui_integration.md` | V2.4 GUI integration: baseline audit, threading contract, stages A–E, per-stage acceptance |

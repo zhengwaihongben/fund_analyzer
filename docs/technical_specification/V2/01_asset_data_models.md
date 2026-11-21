@@ -20,6 +20,13 @@ Rules:
   all map to `equity`; unrecognised or empty values map to `unknown`.
 * `unknown` is retained on the snapshot and counted in
   `uncovered_weight`. It is **never** silently valued as an equity.
+* Classification order (`fa/data/asset_classifier.py`): manual override →
+  asset type **declared by the data source** → formal-name markers
+  (`ETF` / `债券ETF` / `现金` …) → `unknown`. A ticker's *shape* is never
+  evidence: an ETF, a fund and an equity can share the same symbol format, so
+  a plain code with no declaration stays `unknown` (V2.2.2). The QDII holdings
+  builder declares `equity` only because the source table is literally
+  「股票投资明细」, which is a statement by the source, not a guess from the code.
 
 ## 2. Asset
 
@@ -93,12 +100,19 @@ Derived: `total_weight`, `uncovered_weight`, `by_type()`, `is_disclosed_by(day)`
 | `retrieved_at` | `datetime` | when we downloaded it (defaults to now, UTC) |
 | `market` | `str` | |
 | `currency` | `str` | |
-| `price_type` | `str` | `adjusted_close` / `fx_close` / ... |
+| `available_price_type` | `str` | what the source offered: `close+adj_close`, `close`, `fx_close`, … (filled at acquisition time) |
+| `used_price_type` | `str` | which column the calculator actually used; empty until a calculator reads the point |
 | `source` | `str` | vendor name |
 
-`value` returns `adj_close` when present, else `close`. Each point is therefore
-self-describing: the estimator can always report *which* date and *which*
-provider produced the number it used.
+`value` returns `adj_close` when present, else `close`. `price_type` is kept as a
+backward-compatible alias for `used_price_type or available_price_type`, and
+`with_used_price_type(kind)` returns a copy that records the choice.
+
+Available and used are deliberately separate: a source can offer both `Close` and
+`Adj Close` while the calculator ends up using only one of them, and for
+reproducibility we need to know both what was on the table and what was taken.
+The estimator's per-run input snapshot records both fields per asset
+(`available_price_type`, `used_price_type`, plus `price_type_used` on the result).
 
 ### 4.2 PriceSeries
 
@@ -161,8 +175,20 @@ excluded — a 46 %-coverage estimate must never be labelled `estimated`.
 `local_contribution`, `fx_contribution`, `data_quality`, `quality_score`,
 `portfolio`, `warnings`, `message`.
 
-`MODEL_VERSION = "2.0.0"` — bump on any change to the valuation maths so that
+`MODEL_VERSION = "2.2.0"` — bump on any change to the valuation maths so that
 stored runs remain explainable.
+
+`LookAheadStatus` replaces the old `look_ahead_safe: bool` on `EstimationRun`:
+`verified-safe` (disclosure date known and before the target),
+`estimated-disclosure` (the filing date is still an estimate),
+`unsafe`, `unknown`. `run.look_ahead_safe` remains as a convenience property
+that is true only for `verified-safe`.
+
+`AssetReturnResult.status` uses `ReturnStatus`, which separates two questions:
+`is_ok` ("nothing to report") and `is_usable` ("the number may be used, though
+its data is slightly stale"). Coverage, contributions and quality gate on
+`is_usable`; gating them on `is_ok` would silently drop every stale asset
+instead of penalising its quality.
 
 ## 7. Python interfaces
 

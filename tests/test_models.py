@@ -241,6 +241,31 @@ class PriceSeriesTests(unittest.TestCase):
         )
         self.assertEqual(clone.to_dict(), series.to_dict())
 
+    def test_available_and_used_price_type_are_separate(self):
+        # The source offered both columns; nothing has been used yet.
+        point = PricePoint(price_date=date(2026, 11, 9), close=100.0, adj_close=99.0)
+        self.assertEqual(point.available_price_type, "close+adj_close")
+        self.assertEqual(point.used_price_type, "")
+        self.assertEqual(point.price_type, "close+adj_close")  # back-compat alias
+
+        close_only = PricePoint(price_date=date(2026, 11, 9), close=100.0)
+        self.assertEqual(close_only.available_price_type, "close")
+
+        chosen = point.with_used_price_type("adjusted_close")
+        self.assertEqual(chosen.used_price_type, "adjusted_close")
+        self.assertEqual(chosen.price_type, "adjusted_close")
+        self.assertEqual(point.used_price_type, "")  # original untouched
+
+        clone = PricePoint.from_dict(chosen.to_dict())
+        self.assertEqual(clone.available_price_type, "close+adj_close")
+        self.assertEqual(clone.used_price_type, "adjusted_close")
+
+    def test_legacy_price_type_field_still_reads(self):
+        legacy = PricePoint.from_dict(
+            {"price_date": "2026-11-09", "close": 100.0, "price_type": "adjusted_close"}
+        )
+        self.assertEqual(legacy.available_price_type, "adjusted_close")
+
 
 class FxSeriesTests(unittest.TestCase):
     def test_rate_on_or_before(self):

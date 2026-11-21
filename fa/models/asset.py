@@ -66,6 +66,11 @@ SUPPORTED_ASSET_TYPES = frozenset(
 
 #: Currencies that need no FX conversion.
 BASE_CURRENCY = "CNY"
+
+#: Sanity band for a cash interest rate (annualised, so -20%..100%).
+INTEREST_RATE_MIN = -0.2
+INTEREST_RATE_MAX = 1.0
+
 _CURRENCY_ALIASES = {
     "": "",
     "NAN": "",
@@ -162,7 +167,19 @@ class Asset:
                 f"{self.asset_id}: weight 應為基金淨值比例（0–1），收到 {self.weight}"
             )
         if self.interest_rate is not None:
-            self.interest_rate = float(self.interest_rate)
+            try:
+                self.interest_rate = float(self.interest_rate)
+            except (TypeError, ValueError) as exc:
+                raise AssetValidationError(
+                    f"{self.asset_id}: interest_rate 不是數字: {self.interest_rate!r}"
+                ) from exc
+            if not math.isfinite(self.interest_rate):
+                raise AssetValidationError(
+                    f"{self.asset_id}: interest_rate 不是有限數: {self.interest_rate!r}")
+            if not INTEREST_RATE_MIN <= self.interest_rate <= INTEREST_RATE_MAX:
+                raise AssetValidationError(
+                    f"{self.asset_id}: interest_rate {self.interest_rate} 超出合理範圍"
+                    f"（{INTEREST_RATE_MIN}–{INTEREST_RATE_MAX}）")
 
     # -- capability questions --------------------------------------------------
     @property

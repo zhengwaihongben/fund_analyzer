@@ -109,6 +109,12 @@ official_nav (standalone, keyed by fund_code+nav_date)
 `PRIMARY KEY(ticker, price_date, price_type)` — re-downloading the same day
 updates instead of duplicating.
 
+`price_type` stores the **available** price type (what the source provided,
+e.g. `close+adj_close`), never the used one: the used type is a property of a
+particular calculation and lives in `estimation_inputs`. Writing the
+`PricePoint.price_type` alias here would let a computed point re-key an
+existing row (V2.2.2).
+
 ### 3.7 `fx_rates`
 
 | Column | Type |
@@ -197,12 +203,81 @@ reproducible without any network access.
 
 `schema.py` holds an ordered list of migration scripts
 (`MIGRATIONS: list[tuple[int, str]]`). `connection.initialise(path)` applies
-every migration whose id is greater than `schema_version.version`, inside a
-transaction, then records it. Rules:
+every migration whose id is greater than `schema_version.version`, then records
+it. Rules:
 
 * migrations are append-only — never edit a shipped one;
 * each migration must be idempotent-safe for a fresh database;
-* `PRAGMA foreign_keys = ON` and `journal_mode = WAL` are set on connect.
+* `PRAGMA foreign_keys = ON` and `journal_mode = WAL` are set on connect;
+* **one explicit transaction per migration** (`BEGIN IMMEDIATE … COMMIT`), with
+  the SQL body split into single statements executed by `conn.execute` —
+  `executescript()` would issue an implicit `COMMIT` and silently break
+  atomicity. A failure (including an injected crash) rolls the whole migration
+  back and `schema_version` still reports the previous version;
+* column additions are declared in `MIGRATION_COLUMNS[version]` and applied by a
+  `PRAGMA table_info` check, because SQLite has no `ADD COLUMN IF NOT EXISTS`.
+
+### 4.1 Version 2 (V2.3.1 time model)
+
+`SCHEMA_VERSION = 2`. Additive only; see
+`08_v231_data_foundation.md` §4 for the full statement list. New columns:
+
+| table | new columns |
+|---|---|
+| `market_prices` | `market_timestamp`, `available_at`, `availability_source` (default `unknown`), `availability_note`, `fetched_at`, `first_fetched_at`, `dividend`, `split` |
+| `fx_rates` | `base_currency` (default `CNY`), `market_timestamp`, `available_at`, `availability_source`, `availability_note`, `fetched_at` |
+| `estimation_runs` | `look_ahead_status` (default `unknown`) |
+
+New table `price_revisions` — the append-only ledger written before a re-download
+overwrites a stored observation; it keeps every numeric column of the superseded
+row (including `dividend` / `split`), `replaced_at` and `reason`.
+
+Back-fill is conservative: legacy `market_prices.price_timestamp` is copied into
+`market_timestamp` and `retrieved_at` into `fetched_at`, but `available_at`
+stays `NULL` with `availability_source='unknown'`; `look_ahead_safe = 0` becomes
+`unsafe`, `look_ahead_safe = 1` becomes `unknown` (never `verified-safe`, because
+the boolean already lost that information). The legacy columns are still written
+by the repository so V2.2 readers keep working.
+
+### 4.2 Version 3 (V2.3.1 Stage 2.1 — FX revision ledger)
+
+`SCHEMA_VERSION = 3`. Purely additive: one table, two indexes, no back-fill (no
+database in this project holds FX rows yet) and no change to any existing column
+or index.
+
+`fx_revisions` keeps the **superseded** FX observation, mirroring
+`price_revisions`: `revision_id` (autoincrement), `currency`, `rate_date`,
+`rate`, `base_currency` (default `CNY`), `market_timestamp`, `available_at`,
+`availability_source` (default `unknown`), `source`, `fetched_at`,
+`replaced_at` (not null) and `reason`. Indexes:
+`idx_fx_revisions_currency_date (currency, rate_date)` and
+`idx_fx_revisions_replaced_at (replaced_at)`.
+
+`price_revisions` is deliberately not reused: it keys on
+`(ticker, price_date, price_type)` and has no currency/base column, so an FX row
+would require a synthetic `FX:USD/CNY` ticker. The table is created by
+Migration 003 and filled from Stage 2.2 onwards; `tests/test_migration_003.py`
+proves the upgrade on a copy of the frozen baseline, the rollback on an injected
+failure, the idempotent re-run and the byte-identical baseline.
+
+### 4.3 Version 4 (V2.3.2 Stage D — backtest persistence)
+
+`SCHEMA_VERSION = 4`. Purely additive: four new tables, no change to any existing
+table, column or index, and no back-fill.
+
+| Table | Purpose |
+|---|---|
+| `strategy_backtest_runs` | one row per run — `run_id` primary key, `spec_id`, `model_version`, `start`, `end`, `base_currency`, `universe_json`, `spec_json`, `costs_json`, `data_fingerprint`, `look_ahead_status`, `created_at`, `anomalies_json` |
+| `strategy_backtest_metrics` | one row per run — the §7 ratios (`cagr`, `annualised_vol`, `sharpe`, `sortino`, `max_drawdown`, `calmar`, `turnover`, `hit_rate`, `exposure`, `cost_drag`, `total_costs_base`, `sessions`, `trades`) |
+| `strategy_backtest_trades` | one row per trade, `seq`-ordered — session, ticker, side, quantity, prices and FX provenance, cost components, `net_base`, `reason` |
+| `strategy_backtest_equity` | one row per session — cash, holdings, total, exposure, benchmark, drawdown |
+
+`idx_bt_trades_session` indexes `(run_id, session)`; the equity table is keyed by
+`(run_id, session)`. `save_backtest_run()` writes all four rows in one
+transaction, so a run is never half-stored. `anomalies_json` keeps the run's
+engine anomalies (`[]` when empty), so a run reloaded from the database reports
+exactly what the original run recorded instead of an empty tuple. See
+`docs/technical_specification/V2/10_v232_backtest_engine.md` §18.
 
 ## 5. Repository API (`fa/data/database/repository.py`)
 
@@ -217,8 +292,12 @@ class Repository:
     def snapshot_as_of(self, fund_code, day: date) -> HoldingSnapshot | None: ...
 
     # market data
-    def save_prices(self, series: PriceSeries) -> int: ...
+    def save_prices(self, series: PriceSeries) -> int: ...   # writes price_revisions first;
+                                                             # a revised value's available_at
+                                                             # is pushed to replaced_at
     def load_prices(self, ticker, start=None, end=None) -> PriceSeries: ...
+    def prices_as_of(self, ticker, as_of: datetime, start=None, end=None) -> PriceSeries: ...
+    def count_price_revisions(self, ticker, start=None, end=None) -> int: ...
     def save_fx(self, series: FxSeries) -> int: ...
     def load_fx(self, currency, start=None, end=None) -> FxSeries: ...
 

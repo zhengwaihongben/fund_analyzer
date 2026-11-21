@@ -26,7 +26,7 @@ working while the internals moved to the V2 model.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -35,14 +35,30 @@ from fa.analysis.estimation_backtest import backfill_history, read_history, writ
 from fa.analysis.returns import calculate_asset, series_from_frame
 from fa.analysis.valuation import value_portfolio
 from fa.analysis.valuation_dates import resolve_valuation_dates
-from fa.data.fx import fetch_fx_rates
-from fa.data.nav import fetch_nav
+from fa.data.asset_classifier import build_assets
+from fa.config import FX_PIPELINE_ENABLED
+from fa.data.database.connection import DatabaseError
+from fa.data.estimation_storage import (
+    persist_estimate,
+    write_inputs_snapshot,
+)
+from fa.data.fx import fetch_fx_rates, fx_series_map
+from fa.data.fx_pipeline import FxRequest, update_fx
+from fa.data.nav import fetch_nav, load_nav_csv
 from fa.data.qdii_holdings import fetch_qdii_holdings, select_point_in_time
 from fa.data.qdii_market import fetch_holding_prices
-from fa.models.asset import Asset, AssetType, normalise_currency
-from fa.models.estimation import EstimationResult, EstimationRun
+from fa.models.asset import Asset, normalise_currency
+from fa.models.estimation import (
+    MODEL_VERSION,
+    EstimationResult,
+    EstimationRun,
+    LookAheadStatus,
+    new_run_id,
+    resolve_look_ahead_status,
+)
 from fa.models.market_data import FxSeries
 from fa.utils.calendar import to_date
+from fa.utils.calendars import calendar_for, calendar_is_fallback
 from fa.utils.data_quality import assess_quality
 from fa.utils.logging_setup import get_logger
 
@@ -55,28 +71,15 @@ INPUTS_SUFFIX = "_qdii_estimate_inputs.json"
 MARKET_LOOKBACK = "1mo"
 STALE_HOLDINGS_DAYS = 150
 
+# Kept as private aliases for older callers/tests; the implementation lives in
+# the data layer so the analysis layer performs no file I/O.
+_persist = persist_estimate
+_write_inputs_snapshot = write_inputs_snapshot
+
 
 def load_nav_frame(fund_code: str, save_dir: Path) -> pd.DataFrame:
-    """Official NAV series; falls back to a fresh download when missing."""
-    path = Path(save_dir) / f"{fund_code}_daily_nav.csv"
-    if path.exists():
-        try:
-            frame = pd.read_csv(path)
-            frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
-            frame["NAV"] = pd.to_numeric(frame["NAV"], errors="coerce")
-            frame = frame.dropna(subset=["Date", "NAV"]).sort_values("Date")
-            if not frame.empty:
-                return frame[["Date", "NAV"]].reset_index(drop=True)
-        except Exception as exc:  # noqa: BLE001 - 壞檔就重抓
-            log.warning("淨值緩存不可讀（%s），重新下載", exc)
-
-    frame = fetch_nav(fund_code, Path(save_dir))
-    if frame is None or frame.empty:
-        return pd.DataFrame(columns=["Date", "NAV"])
-    frame = frame.copy()
-    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
-    frame["NAV"] = pd.to_numeric(frame["NAV"], errors="coerce")
-    return frame.dropna(subset=["Date", "NAV"]).sort_values("Date").reset_index(drop=True)
+    """Official NAV series; the CSV read lives in :mod:`fa.data.nav`."""
+    return load_nav_csv(fund_code, save_dir)
 
 
 def _nav_on(frame: pd.DataFrame, day) -> float | None:
@@ -104,46 +107,81 @@ def _empty_record(fund_code: str, computed_at: str, status: str, message: str,
     return record
 
 
-def _build_assets(holdings: pd.DataFrame, price_hits: dict) -> list[Asset]:
-    """Convert one holdings quarter into :class:`Asset` objects."""
-    assets: list[Asset] = []
-    for row in holdings.to_dict("records"):
-        ticker = str(row.get("ticker") or "").strip()
-        hit = price_hits.get(ticker) or {}
-        currency = normalise_currency(hit.get("currency") or row.get("currency_hint"))
-        market = hit.get("exchange") or row.get("market")
-        assets.append(
-            Asset(
-                asset_id=ticker,
-                name=str(row.get("name") or ticker),
-                asset_type=AssetType.EQUITY,
-                ticker=ticker,
-                market=market or None,
-                currency=currency,
-                weight=float(row.get("weight") or 0.0),
-                holding_date=to_date(row.get("holding_date")) if row.get("holding_date") else None,
-                source=str(row.get("source") or ""),
-            )
-        )
-    return assets
-
-
 def _fx_series(rates: dict) -> dict[str, FxSeries]:
-    """Wrap raw FX pandas series into the V2 :class:`FxSeries` model."""
-    out: dict[str, FxSeries] = {}
-    for currency, series in (rates or {}).items():
-        if series is None or len(series) == 0:
+    """Wrapper kept for callers; the conversion lives in :mod:`fa.data.fx`."""
+    return fx_series_map(rates)
+
+
+def _pit_moment(as_of: datetime | None) -> datetime:
+    """The instant whose published data this estimate is allowed to use."""
+    if as_of is None:
+        return datetime.now(timezone.utc)
+    if as_of.tzinfo is None:
+        log.warning("估算時間沒有時區，PIT 匯率按 UTC 解讀：%s", as_of)
+        return as_of.replace(tzinfo=timezone.utc)
+    return as_of
+
+
+def _resolve_fx(currencies, repository, *, start: date, end: date,
+                as_of: datetime | None):
+    """FX series for the estimate plus a label saying which path produced them.
+
+    ``pipeline-pit`` writes fresh bars through :func:`update_fx` and then reads
+    back only the rates already published at ``as_of``.  The series returned by
+    ``update_fx`` itself is deliberately **not** used here: it also carries the
+    bars of the London day that is still in progress, and those must stay
+    invisible to the estimate.  ``legacy`` is the pre-Stage-2.5 download path
+    and is used only when the pipeline is switched off or the database cannot
+    accept the write.
+    """
+    warnings: list[str] = []
+    wanted = sorted({normalise_currency(code) for code in currencies if code})
+    wanted = [code for code in wanted if code and code != "CNY"]
+    if not wanted:
+        return {}, "none", warnings
+    if not FX_PIPELINE_ENABLED or repository is None:
+        if repository is None:
+            warnings.append("沒有資料庫可用，FX 改用舊下載路徑（無 PIT 保證）")
+        return _fx_series(fetch_fx_rates(wanted, start=start, end=end)), "legacy", warnings
+    try:
+        outcome = update_fx(
+            FxRequest(currencies=wanted, start=start, end=end), repository
+        )
+    except DatabaseError as exc:
+        warnings.append(f"FX pipeline 無法寫入資料庫（{exc}），改用舊下載路徑（無 PIT 保證）")
+        return _fx_series(fetch_fx_rates(wanted, start=start, end=end)), "legacy", warnings
+    except Exception as exc:  # noqa: BLE001 - pipeline 失敗不應讓估算失敗
+        warnings.append(f"FX pipeline 失敗：{exc}")
+    else:
+        warnings.extend(outcome.warnings)
+        for code, reason in sorted(outcome.skipped.items()):
+            warnings.append(f"{code}: {reason}")
+    moment = _pit_moment(as_of)
+    series: dict[str, FxSeries] = {}
+    for code in wanted:
+        try:
+            loaded = repository.fx_as_of(code, moment, start=start, end=end)
+        except Exception as exc:  # noqa: BLE001 - 單一貨幣失敗只影響自己
+            warnings.append(f"{code}: PIT 匯率讀取失敗（{exc}）")
             continue
-        pairs = [
-            (pd.Timestamp(index).date(), float(value))
-            for index, value in series.items()
-            if float(value) == float(value)
-        ]
-        if pairs:
-            out[str(currency).upper()] = FxSeries.from_pairs(
-                str(currency).upper(), pairs, source="yahoo"
-            )
-    return out
+        if len(loaded):
+            series[code] = loaded
+            try:
+                stored = repository.load_fx(code)
+            except Exception:  # noqa: BLE001 - 只是診斷訊息
+                stored = None
+            if stored is not None:
+                hidden = sum(
+                    1 for point in stored.points
+                    if point.available_at is not None and point.available_at > moment
+                )
+                if hidden:
+                    warnings.append(
+                        f"{code}: {hidden} 筆匯率尚未公布，已按 PIT 排除")
+        else:
+            warnings.append(
+                f"{code}: 截至 {moment.isoformat()} 尚無已公布匯率（PIT 排除）")
+    return series, "pipeline-pit", warnings
 
 
 def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
@@ -200,31 +238,53 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
                                          "base_nav_date", "timezone", "cutoff",
                                          "as_of_beijing")},
             base_nav=base_nav,
-            look_ahead_safe=True,
+            look_ahead_safe=False,
+            look_ahead_status=LookAheadStatus.UNKNOWN.value,
             quarters_available=available,
         )
     holdings = selection["holdings"]
 
+    # One run id per estimate: it is the identity of the run everywhere (SQLite,
+    # history CSV, input snapshot), so re-estimating the same target date never
+    # destroys the earlier run.
+    run_id = new_run_id()
+    look_ahead_status = resolve_look_ahead_status(
+        disclosure_date=selection.get("disclosure_date"),
+        disclosure_date_estimated=bool(selection.get("disclosure_date_estimated", True)),
+        target_date=target_date,
+    )
+
     tickers = [str(t) for t in holdings["ticker"].tolist() if str(t).strip()]
-    price_hits = fetch_holding_prices(tickers, range_=MARKET_LOOKBACK)
+    look_start = base_date - timedelta(days=10)
+    price_series, price_hits = _market_data(
+        tickers, look_start, target_date, repository
+    )
 
-    assets = _build_assets(holdings, price_hits)
+    assets = build_assets(holdings, price_hits)
+
+    # The declared currency wins, but a holding whose currency the source did
+    # not label still needs its quote currency fetched, otherwise the FX leg
+    # would be silently skipped.
     currencies = {asset.currency for asset in assets if asset.currency}
-    fx_map = _fx_series(fetch_fx_rates(currencies, range_=MARKET_LOOKBACK))
+    currencies |= {
+        series.currency for series in price_series.values() if series.currency
+    }
+    fx_map, fx_source, fx_warnings = _resolve_fx(
+        currencies, repository, start=look_start, end=target_date, as_of=as_of,
+    )
 
-    price_series = {}
-    for ticker in tickers:
-        hit = price_hits.get(ticker) or {}
-        frame = hit.get("prices")
-        if frame is None:
-            continue
-        price_series[ticker] = series_from_frame(
-            frame,
-            ticker=ticker,
-            market=str(hit.get("exchange") or ""),
-            currency=normalise_currency(hit.get("currency")),
-            source="yahoo",
-        )
+    def _fx_for(asset: Asset) -> FxSeries | None:
+        code = asset.currency or (price_series.get(asset.asset_id).currency
+                                  if asset.asset_id in price_series else "")
+        return fx_map.get(normalise_currency(code))
+
+    # Each holding gets its own market calendar: a QDII fund can hold a US, a
+    # Swiss and a Hong Kong position in the same quarter, and one calendar
+    # cannot judge all three for staleness.
+    calendars = {
+        asset.asset_id: calendar_for(asset.market or "", asset.ticker)
+        for asset in assets
+    }
 
     results = [
         calculate_asset(
@@ -232,17 +292,26 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
             base_date=base_date,
             target_date=target_date,
             prices=price_series.get(asset.asset_id),
-            fx=fx_map.get(asset.currency),
+            fx=_fx_for(asset),
+            calendar=calendars[asset.asset_id],
         )
         for asset in assets
     ]
     for asset, result in zip(assets, results):
         hit = price_hits.get(asset.asset_id) or {}
+        cal = calendars[asset.asset_id]
         result.extra.update({
             "name": asset.name,
             "market": asset.market or "",
             "symbol": hit.get("symbol") or asset.ticker,
+            "asset_type": asset.asset_type.value,
+            "classification": asset.extra.get("classification", ""),
+            "calendar": getattr(cal, "market", ""),
+            "calendar_fallback": calendar_is_fallback(cal),
         })
+    calendar_fallback = any(
+        bool(result.extra.get("calendar_fallback")) for result in results
+    )
     summary = value_portfolio(
         _snapshot_view(fund_code, selection, assets), results
     )
@@ -260,9 +329,11 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
         results,
         disclosure_date_estimated=bool(selection.get("disclosure_date_estimated", True)),
         base_nav_fresh=_base_nav_is_fresh(nav_df, base_date, target_date),
+        calendar_fallback=calendar_fallback,
     )
 
     warnings_list: list[str] = list(portfolio.get("warnings") or [])
+    warnings_list.extend(fx_warnings)
     if portfolio.get("source") == "cache-stale":
         warnings_list.append("持倉無法更新，改用本機較舊快照，權重可能已偏離實際")
     if portfolio.get("holdings_scope") == "top10":
@@ -306,7 +377,26 @@ def estimate_qdii_nav(fund_code: str, save_dir: Path, cfg: dict | None = None,
         quality=quality,
         market_data_date=market_data_date,
         warnings_list=warnings_list,
+        run_id=run_id,
+        look_ahead_status=look_ahead_status,
+        inputs=_inputs_snapshot(
+            fund_code=fund_code,
+            cfg=cfg,
+            base_date=base_date,
+            target_date=target_date,
+            base_nav=base_nav,
+            selection=selection,
+            portfolio=portfolio,
+            assets=assets,
+            results=results,
+            price_series=price_series,
+            fx_map=fx_map,
+            calendars=calendars,
+        ),
     )
+    record["fx_source"] = fx_source
+    if isinstance(record.get("inputs"), dict):
+        record["inputs"]["fx_source"] = fx_source
 
     if estimated_nav is None:
         log.warning(f"[{fund_code}] QDII 估算 {target_date}: 沒有可估值的持倉"
@@ -338,6 +428,167 @@ def _snapshot_view(fund_code: str, selection: dict, assets: list[Asset]):
     )
 
 
+def _market_data(tickers: list[str], start: date, end: date, repository=None):
+    """Prices for the estimation window, database first, network second.
+
+    The window is the valuation interval itself (plus a few days of slack), not
+    a fixed lookback: an estimate for a July target date must not be built from
+    the last month of November quotes.
+    """
+    series_map: dict = {}
+    hits: dict = {}
+    missing: list[str] = []
+    for ticker in tickers:
+        cached = _db_prices(repository, ticker, start, end)
+        if cached is None:
+            missing.append(ticker)
+            continue
+        series_map[ticker] = cached
+        hits[ticker] = {
+            "market": cached.market,
+            "currency": cached.currency,
+            "symbol": ticker,
+            "source": "database",
+        }
+    if missing:
+        fetched = fetch_holding_prices(missing, start=start, end=end) or {}
+        for ticker, hit in fetched.items():
+            frame = (hit or {}).get("prices")
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            series = series_from_frame(
+                frame,
+                ticker=ticker,
+                market=str((hit or {}).get("exchange") or ""),
+                currency=normalise_currency((hit or {}).get("currency")),
+                source="yahoo",
+            )
+            series_map[ticker] = series
+            hits[ticker] = {
+                "market": series.market,
+                "currency": series.currency,
+                "symbol": (hit or {}).get("symbol") or ticker,
+                "source": "yahoo",
+            }
+            _save_prices(repository, series)
+    return series_map, hits
+
+
+def _db_prices(repository, ticker: str, start: date, end: date):
+    if repository is None:
+        return None
+    try:
+        series = repository.load_prices(ticker, start=start, end=end)
+    except Exception as exc:  # noqa: BLE001 - 資料庫只是快取，不能擋住估算
+        log.debug("[prices] 讀取資料庫 %s 失敗: %s", ticker, exc)
+        return None
+    if series is None or not getattr(series, "points", None):
+        return None
+    return series
+
+
+def _save_prices(repository, series) -> None:
+    if repository is None or series is None:
+        return
+    try:
+        repository.save_prices(series)
+    except Exception as exc:  # noqa: BLE001 - 寫入失敗只損失快取
+        log.debug("[prices] 寫入資料庫 %s 失敗: %s", getattr(series, "ticker", ""), exc)
+
+
+def _price_point(series, day: date):
+    if series is None:
+        return None
+    try:
+        return series.point_on_or_before(day)
+    except Exception:  # noqa: BLE001 - 快照不該讓估算失敗
+        return None
+
+
+def _fx_point(fx: FxSeries | None, day: date):
+    if fx is None:
+        return (None, None)
+    try:
+        return fx.rate_on_or_before(day)
+    except Exception:  # noqa: BLE001
+        return (None, None)
+
+
+def _inputs_snapshot(*, fund_code: str, cfg: dict, base_date: date,
+                     target_date: date, base_nav: float, selection: dict,
+                     portfolio: dict, assets: list[Asset], results,
+                     price_series: dict, fx_map: dict, calendars: dict) -> dict:
+    """Everything needed to reproduce this estimate without hitting the network.
+
+    Yahoo revises history; a stored return is worthless without the price
+    values, FX rates, dates and calendars it was computed from.
+    """
+    by_id = {asset.asset_id: asset for asset in assets}
+    asset_rows = []
+    for result in results:
+        asset = by_id.get(result.asset_id)
+        series = price_series.get(result.asset_id)
+        base_point = _price_point(series, base_date)
+        target_point = _price_point(series, target_date)
+        currency = result.currency or (asset.currency if asset else "")
+        fx_rates = fx_map.get(normalise_currency(currency))
+        fx_base, fx_base_date = _fx_point(fx_rates, base_date)
+        fx_target, fx_target_date = _fx_point(fx_rates, target_date)
+        calendar = calendars.get(result.asset_id)
+        asset_rows.append({
+            "ticker": result.asset_id,
+            "name": (asset.name if asset else None),
+            "asset_type": (asset.asset_type.value if asset else "unknown"),
+            "classification": (asset.extra.get("classification") if asset else ""),
+            "weight": result.weight,
+            "currency": currency,
+            "market": (asset.market if asset else "") or "",
+            "calendar": getattr(calendar, "market", ""),
+            "calendar_fallback": calendar_is_fallback(calendar) if calendar else False,
+            "price_type_used": result.price_type_used,
+            "available_price_type": getattr(base_point, "available_price_type", "") or "",
+            "used_price_type": (
+                result.price_type_used
+                or getattr(target_point, "used_price_type", "")
+                or getattr(base_point, "used_price_type", "")
+            ),
+            "base_price_date": _iso(getattr(base_point, "price_date", None)),
+            "base_price": getattr(base_point, "value", None),
+            "target_price_date": _iso(getattr(target_point, "price_date", None)),
+            "target_price": getattr(target_point, "value", None),
+            "base_fx_date": _iso(fx_base_date),
+            "base_fx": fx_base,
+            "target_fx_date": _iso(fx_target_date),
+            "target_fx": fx_target,
+            "status": result.status.value,
+            "local_return": result.local_return,
+            "fx_return": result.fx_return,
+            "return_cny": result.return_cny,
+            "cash_rate": (result.extra or {}).get("annual_rate"),
+            "cash_rate_source": (result.extra or {}).get("rate_source"),
+            "warnings": list(result.warnings),
+        })
+    return {
+        "fund_code": fund_code,
+        "model_version": MODEL_VERSION,
+        "config": {k: v for k, v in (cfg or {}).items() if k != "fund_name"},
+        "base_nav_date": _iso(base_date),
+        "target_nav_date": _iso(target_date),
+        "base_nav": base_nav,
+        "holdings": {
+            "quarter": selection.get("quarter"),
+            "holding_date": _iso(selection.get("holding_date")),
+            "disclosure_date": _iso(selection.get("disclosure_date")),
+            "disclosure_date_estimated": bool(
+                selection.get("disclosure_date_estimated", True)),
+            "source": portfolio.get("source"),
+            "scope": portfolio.get("holdings_scope"),
+            "total_weight": float(selection["holdings"]["weight"].sum()),
+        },
+        "assets": asset_rows,
+    }
+
+
 def _base_nav_is_fresh(nav_df: pd.DataFrame, base_date: date, target_date: date) -> bool:
     """True when the base NAV is the last published NAV before the target date."""
     if nav_df.empty:
@@ -362,11 +613,14 @@ def _legacy_record(*, fund_code: str, cfg: dict, computed_at: str, dates: dict,
                    target_date: date, base_date: date, base_nav: float,
                    estimated_nav: float, summary, results, selection: dict,
                    portfolio: dict, quality, market_data_date,
-                   warnings_list: list[str]) -> dict:
+                   warnings_list: list[str], run_id: str = "",
+                   look_ahead_status: LookAheadStatus = LookAheadStatus.UNKNOWN,
+                   inputs: dict | None = None) -> dict:
     """Serialize the V2 objects into the field names existing consumers expect."""
     rows = [_legacy_row(result) for result in results]
     interaction = (summary.estimated_return or 0.0) - summary.local_contribution - summary.fx_contribution
     return {
+        "run_id": run_id,
         "status": summary.status.value,
         "fund_code": fund_code,
         "fund_name": cfg.get("fund_name"),
@@ -401,16 +655,19 @@ def _legacy_record(*, fund_code: str, cfg: dict, computed_at: str, dates: dict,
         "holdings_date": _iso(selection.get("holding_date")),
         "disclosure_date": _iso(selection.get("disclosure_date")),
         "disclosure_date_estimated": selection.get("disclosure_date_estimated", True),
-        "look_ahead_safe": True,
+        "look_ahead_safe": look_ahead_status.is_strictly_safe,
+        "look_ahead_status": look_ahead_status.value,
         "quarters_available": portfolio.get("quarters") or [],
         "holdings_source": portfolio.get("source"),
         "holdings_scope": portfolio.get("holdings_scope"),
         "history_available": bool(portfolio.get("history_available")),
         "data_quality": quality.grade.value,
         "quality_score": quality.score,
+        "quality": quality.to_dict(),
         "holdings": _rounded_rows(rows),
         "warnings": warnings_list,
         "message": "；".join(warnings_list) if warnings_list else None,
+        "inputs": inputs or {},
     }
 
 
@@ -424,6 +681,9 @@ def _legacy_row(result) -> dict:
         "currency": result.currency,
         "market": result.extra.get("market") if result.extra else None,
         "status": result.status.value,
+        "asset_type": (result.extra or {}).get("asset_type"),
+        "classification": (result.extra or {}).get("classification"),
+        "price_type_used": result.price_type_used,
         "local_return": result.local_return,
         "fx_return": result.fx_return,
         "cny_return": result.return_cny,
@@ -455,13 +715,14 @@ def _save_to_database(repository, record: dict, nav_df: pd.DataFrame,
             base_nav_date=to_date(record["base_nav_date"]) if record.get("base_nav_date") else None,
             as_of=as_of_value,
             mode="qdii",
+            run_id=record.get("run_id") or new_run_id(),
             holdings_quarter=record.get("holdings_quarter"),
             holdings_date=to_date(record["holdings_date"]) if record.get("holdings_date") else None,
             disclosure_date=(to_date(record["disclosure_date"])
                              if record.get("disclosure_date") else None),
             disclosure_date_estimated=bool(record.get("disclosure_date_estimated")),
             holdings_source=record.get("holdings_source") or "",
-            look_ahead_safe=bool(record.get("look_ahead_safe", True)),
+            look_ahead_status=LookAheadStatus.parse(record.get("look_ahead_status")),
         )
         result = EstimationResult(
             run_id=run.run_id,
@@ -483,7 +744,7 @@ def _save_to_database(repository, record: dict, nav_df: pd.DataFrame,
                 record["fund_code"],
                 [(row["Date"], row["NAV"]) for row in nav_df.to_dict("records")],
             )
-        repository.save_estimation(run, record, result)
+        repository.save_estimation(run, record.get("inputs") or record, result)
         log.info(f"[{record['fund_code']}] 估算已寫入資料庫 run={run.run_id[:8]}")
         return run.run_id
     except Exception as exc:  # noqa: BLE001 - 資料庫失敗不該讓估算消失
@@ -499,73 +760,3 @@ def _rounded_rows(rows: list[dict]) -> list[dict]:
             **{k: round(v, 6) for k, v in row.items() if isinstance(v, float)},
         })
     return out
-
-
-def _persist(record: dict, save_dir: Path, nav_df: pd.DataFrame) -> None:
-    """Write the latest estimate plus one history row (idempotent per target)."""
-    json_path = save_dir / f"{record['fund_code']}{ESTIMATE_SUFFIX}"
-    try:
-        json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
-    except OSError as exc:
-        log.warning("QDII 估算結果寫入失敗: %s", exc)
-
-    history_path = save_dir / f"{record['fund_code']}{HISTORY_SUFFIX}"
-    history = read_history(history_path)
-    row = {
-        "computed_at": record["computed_at"],
-        "target_nav_date": record["target_nav_date"],
-        "base_nav_date": record["base_nav_date"],
-        "base_nav": record["base_nav"],
-        "estimated_nav": record["estimated_nav"],
-        "estimated_return": record["estimated_return"],
-        "coverage_ratio": record["coverage_ratio"],
-        "uncovered_weight": record.get("uncovered_weight"),
-        "holdings_quarter": record.get("holdings_quarter"),
-        "holdings_date": record.get("holdings_date"),
-        "disclosure_date": record.get("disclosure_date"),
-        "disclosure_date_estimated": record.get("disclosure_date_estimated"),
-        "look_ahead_safe": record.get("look_ahead_safe"),
-        "holdings_source": record.get("holdings_source"),
-        "status": record["status"],
-        "official_nav": None,
-        "error": None,
-        "abs_error": None,
-    }
-    history = pd.concat([history, pd.DataFrame([row])], ignore_index=True) \
-        if not history.empty else pd.DataFrame([row])
-    history = history.drop_duplicates(subset=["target_nav_date"], keep="last")
-    history = backfill_history(history, nav_df)
-    write_history(history, history_path)
-    _write_inputs_snapshot(record, save_dir)
-
-
-def _write_inputs_snapshot(record: dict, save_dir: Path) -> None:
-    """Keep the complete input snapshot of every estimate, per target date.
-
-    The history CSV only carries the summary line; without the per-holding
-    prices, FX rates and the dates they were quoted on, an old estimate cannot
-    be reproduced or its error traced back to one holding.  This file keeps
-    the full record keyed by ``target_nav_date`` so a later run never
-    overwrites the inputs of an earlier one.
-    """
-    path = Path(save_dir) / f"{record.get('fund_code')}{INPUTS_SUFFIX}"
-    snapshots: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(existing, dict) and isinstance(existing.get("snapshots"), dict):
-                snapshots = existing["snapshots"]
-        except (OSError, ValueError) as exc:
-            log.warning("QDII 估算輸入快照不可讀（%s），重新建立", exc)
-    snapshots[str(record.get("target_nav_date"))] = record
-    payload = {
-        "fund_code": record.get("fund_code"),
-        "updated_at": record.get("computed_at"),
-        "snapshots": snapshots,
-    }
-    try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
-    except OSError as exc:
-        log.warning("QDII 估算輸入快照寫入失敗: %s", exc)

@@ -25,14 +25,38 @@ class ReturnStatus(str, Enum):
     STALE_PRICE = "stale-price"
     STALE_BASE_PRICE = "stale-base-price"
     MISSING_CURRENCY = "missing-currency"
+    CURRENCY_MISMATCH = "currency-mismatch"
     MISSING_FX = "missing-fx"
     STALE_FX = "stale-fx"
     STALE_BASE_FX = "stale-base-fx"
     UNSUPPORTED_ASSET = "unsupported-asset"
+    INVALID_INPUT = "invalid-input"
 
     @property
     def is_ok(self) -> bool:
         return self is ReturnStatus.OK
+
+    @property
+    def is_usable(self) -> bool:
+        """True when the asset still counts, even if its data is slightly stale.
+
+        ``ok`` means "nothing to report"; ``usable`` means "the number may be
+        used, but it is not perfect".  Coverage, contributions and quality all
+        gate on *usable* — gating on ``ok`` would silently drop every stale
+        asset instead of penalising its quality.
+        """
+        return self.is_ok or self in USABLE_STALE_STATUSES
+
+
+#: Statuses that keep the asset in the estimate while lowering confidence.
+USABLE_STALE_STATUSES = frozenset(
+    {
+        ReturnStatus.STALE_PRICE,
+        ReturnStatus.STALE_BASE_PRICE,
+        ReturnStatus.STALE_FX,
+        ReturnStatus.STALE_BASE_FX,
+    }
+)
 
 
 class PortfolioStatus(str, Enum):
@@ -81,6 +105,7 @@ class AssetReturnResult:
     base_fx_date: date | None = None
     target_fx_date: date | None = None
     currency: str = ""
+    price_type_used: str = ""
     local_contribution: float | None = None
     fx_contribution: float | None = None
     warnings: list[str] = field(default_factory=list)
@@ -104,7 +129,7 @@ class AssetReturnResult:
             self.return_cny = (1.0 + self.local_return) * (1.0 + self.fx_return) - 1.0
         if self.local_contribution is None and self.fx_contribution is None:
             if (
-                self.status.is_ok
+                self.status.is_usable
                 and self.local_return is not None
                 and self.fx_return is not None
             ):
@@ -117,9 +142,14 @@ class AssetReturnResult:
         return self.status.is_ok
 
     @property
+    def is_usable(self) -> bool:
+        """True when this result may enter coverage and the fund return."""
+        return self.status.is_usable and self.return_cny is not None
+
+    @property
     def contribution(self) -> float:
         """Contribution to the fund return (0 when the asset is excluded)."""
-        if not self.is_ok:
+        if not self.is_usable:
             return 0.0
         if self.local_contribution is None or self.fx_contribution is None:
             return 0.0
@@ -143,6 +173,7 @@ class AssetReturnResult:
             "base_fx_date": self.base_fx_date.isoformat() if self.base_fx_date else None,
             "target_fx_date": self.target_fx_date.isoformat() if self.target_fx_date else None,
             "currency": self.currency,
+            "price_type_used": self.price_type_used,
             "warnings": list(self.warnings),
             "extra": dict(self.extra),
         }
@@ -191,7 +222,7 @@ class PortfolioReturnResult:
         return min(1.0, self.covered_weight / self.disclosed_weight)
 
     def excluded(self) -> list[AssetReturnResult]:
-        return [asset for asset in self.assets if not asset.is_ok]
+        return [asset for asset in self.assets if not asset.is_usable]
 
     def to_dict(self) -> dict[str, Any]:
         return {

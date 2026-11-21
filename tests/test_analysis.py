@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """技術指標與風險指標的單元測試（全部使用合成數據，不訪問網絡）。"""
+import re
 import shutil
 import tempfile
 import unittest
@@ -142,8 +143,11 @@ class HoldingsChartTests(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(out.name, "000369_holdings_pie.html")
         html = out.read_text(encoding="utf-8")
-        self.assertIn("最新季度持仓", html)
-        self.assertIn("其他（未披露）", html)   # 未披露部分要畫成一片，不能藏起來
+        # Plotly 依版本決定把圖表腳本裡的中文寫成原字或 \uXXXX 轉義，兩種都算通過。
+        visible = re.sub(r"\\u([0-9a-fA-F]{4})",
+                         lambda m: chr(int(m.group(1), 16)), html)
+        self.assertIn("最新季度持仓", visible)
+        self.assertIn("其他（未披露）", visible)   # 未披露部分要畫成一片，不能藏起來
 
         clean = pd.read_csv(self.tmp / "000369_holdings_clean.csv", encoding="utf-8-sig")
         self.assertEqual(list(clean["QuarterLabel"].unique()), ["2026Q3"])

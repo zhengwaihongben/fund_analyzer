@@ -42,7 +42,13 @@ QDII_DISCLOSURE_LAG_DAYS = 21
 COLUMNS = [
     "ticker", "name", "weight", "currency_hint", "market",
     "quarter", "holding_date", "disclosure_date", "disclosure_date_estimated",
+    "asset_type",
 ]
+
+#: The Eastmoney table this data comes from is literally 「股票投资明细」 (equity
+#: holdings detail).  That label is a *source-declared* asset type — it is used
+#: instead of guessing from the ticker's shape, which proves nothing.
+EQUITY_TABLE_MARKER = "股票投资明细"
 
 _QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 
@@ -81,7 +87,8 @@ def save_quarters_to_db(repository, fund_code: str, frame: pd.DataFrame,
                 "currency": row.get("currency_hint"),
                 "holding_date": row.get("holding_date"),
                 "disclosure_date": row.get("disclosure_date"),
-                "asset_type": AssetType.EQUITY,
+                # 保留來源聲明的資產類型；沒有聲明就是 unknown，不能在這裡重新假設。
+                "asset_type": AssetType.parse(row.get("asset_type")),
             })
         try:
             snapshot = snapshot_from_rows(
@@ -120,6 +127,9 @@ def load_quarters_from_db(repository, fund_code: str) -> pd.DataFrame:
                 "weight": asset.weight,
                 "currency_hint": asset.currency,
                 "market": asset.market,
+                # 資料庫存的是「來源聲明的類型」，讀回來時必須一起帶上，
+                # 否則離線 fallback 會把每隻持倉都變成 unknown（無法估值）。
+                "asset_type": asset.asset_type.value,
                 "quarter": snapshot.quarter,
                 "holding_date": snapshot.holding_date.isoformat() if snapshot.holding_date else "",
                 "disclosure_date": snapshot.disclosure_date.isoformat() if snapshot.disclosure_date else "",
@@ -165,6 +175,17 @@ def market_and_currency(ticker: str) -> tuple[str | None, str | None]:
     if compact.isalpha():
         return "US", "USD"
     return None, None
+
+
+def _source_asset_type(row) -> str:
+    """Asset type declared by the source table, never inferred from the ticker.
+
+    Eastmoney's 「股票投资明细」 table is the equity-holdings table; its label is
+    trustworthy evidence.  Anything else returns ``""`` so the classifier keeps
+    the holding as ``unknown`` instead of guessing.
+    """
+    label = str(row.get("Quarter") or "") or str(row.get("_quarter") or "")
+    return "equity" if EQUITY_TABLE_MARKER in label else ""
 
 
 def build_qdii_holdings(raw: pd.DataFrame, quarter: str | None = None,
@@ -213,6 +234,7 @@ def build_qdii_holdings(raw: pd.DataFrame, quarter: str | None = None,
             "holding_date": end.isoformat() if end else "",
             "disclosure_date": disclosed.isoformat() if disclosed else "",
             "disclosure_date_estimated": True,
+            "asset_type": _source_asset_type(row),
         })
 
     out = pd.DataFrame(rows, columns=COLUMNS)
@@ -283,6 +305,13 @@ def _cached_holdings(cache_path: Path, fund_code: str, source: str,
     cached = cached.dropna(subset=["weight"])
     if cached.empty:
         return None
+    if "asset_type" not in cached.columns:
+        # 舊版快取沒有來源聲明的資產類型；補空欄位並提示重抓，而不是替它猜類型。
+        cached["asset_type"] = ""
+        log.warning(
+            f"[{fund_code}] 持倉快取缺少 asset_type 欄位（來源聲明的資產類型），"
+            "請以 --no-cache 重新抓取；本次這些持倉會被視為 unknown"
+        )
     if note:
         log.warning(f"[{fund_code}] {note}")
     return _assemble(fund_code, cached, source, cache_hit=True)

@@ -1,0 +1,54 @@
+{
+  "baseline_zip": "dist/fund_analyzer_review.zip",
+  "files": [
+    {
+      "file": "fa/backtesting/__init__.py",
+      "current": "692004e44c98849ccf20275dbf118518ba6db9c2255d87936cf03225d92b7fb9",
+      "archived": "692004e44c98849ccf20275dbf118518ba6db9c2255d87936cf03225d92b7fb9",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/benchmark.py",
+      "current": "1f5bafb4b5f02c7683d5a8f9915ee7def3eb8372216f2f8b18e8ebe6aa5a7c4f",
+      "archived": "1f5bafb4b5f02c7683d5a8f9915ee7def3eb8372216f2f8b18e8ebe6aa5a7c4f",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/costs.py",
+      "current": "0fed4250f7a268ffe5d3e6fd43d993700c1b82adca544940dd0cb2eff672f2f9",
+      "archived": "0fed4250f7a268ffe5d3e6fd43d993700c1b82adca544940dd0cb2eff672f2f9",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/data_access.py",
+      "current": "e015ef42a89a42da86ad5dafc19c85bd44757b83e7defcac0b679435d0236177",
+      "archived": "e015ef42a89a42da86ad5dafc19c85bd44757b83e7defcac0b679435d0236177",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/engine.py",
+      "current": "471dd4e6beecc54884ada92d50944f2c337f5e27993465217e025dd958785b78",
+      "archived": "471dd4e6beecc54884ada92d50944f2c337f5e27993465217e025dd958785b78",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/metrics.py",
+      "current": "24c3f885a2ccd58b95bd3fa1711f276f31da8a4eb6035628445461b29c38acb7",
+      "archived": "24c3f885a2ccd58b95bd3fa1711f276f31da8a4eb6035628445461b29c38acb7",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/models.py",
+      "current": "981fef14b0777eb3dae43c54e8a8603696952a968d592df54fdf7ab5b732dcb7",
+      "archived": "981fef14b0777eb3dae43c54e8a8603696952a968d592df54fdf7ab5b732dcb7",
+      "identical": true
+    },
+    {
+      "file": "fa/backtesting/runner.py",
+      "current": "b3e8f34b1211589e7fb6efbec662dc482f4eecf06f3860b236151efe842d1f82",
+      "archived": "b3e8f34b1211589e7fb6efbec662dc482f4eecf06f3860b236151efe842d1f82",
+      "identical": true
+    }
+  ],
+  "all_identical": true
+}

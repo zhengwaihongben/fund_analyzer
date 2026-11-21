@@ -119,12 +119,23 @@ def _frame_from_chart(result: dict) -> pd.DataFrame | None:
 
 
 def fetch_yahoo_chart(symbol: str, range_: str = "1mo",
-                      interval: str = "1d") -> dict | None:
-    """Download one symbol's daily history; ``None`` when unavailable."""
+                      interval: str = "1d", start=None, end=None) -> dict | None:
+    """Download one symbol's daily history; ``None`` when unavailable.
+
+    ``start``/``end`` (dates) fetch an explicit window instead of a trailing
+    ``range_``: a valuation for July cannot be served by "the last month" in
+    November, and the caller must not silently get the wrong window.
+    """
     url = CHART_URL.format(symbol=requests.utils.quote(symbol))
+    params: dict[str, object] = {"interval": interval}
+    if start is not None and end is not None:
+        params["period1"] = int(pd.Timestamp(start).timestamp())
+        params["period2"] = int((pd.Timestamp(end) + pd.Timedelta(days=1)).timestamp())
+    else:
+        params["range"] = range_
     try:
         resp = requests.get(url, headers=_BROWSER_HEADERS,
-                            params={"range": range_, "interval": interval},
+                            params=params,
                             timeout=REQUEST_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 - 網路層一律降級處理
         log.debug("行情下載失敗 %s: %s", symbol, exc)
@@ -161,7 +172,8 @@ def fetch_yahoo_chart(symbol: str, range_: str = "1mo",
     }
 
 
-def fetch_holding_price(code: str, range_: str = "1mo") -> dict:
+def fetch_holding_price(code: str, range_: str = "1mo", start=None,
+                        end=None) -> dict:
     """Resolve and download one holding's price history.
 
     Returns ``{"status": "ok"|"missing", "symbol", "currency", "prices",
@@ -171,7 +183,7 @@ def fetch_holding_price(code: str, range_: str = "1mo") -> dict:
     tried: list[str] = []
     for symbol in candidate_symbols(code):
         tried.append(symbol)
-        hit = fetch_yahoo_chart(symbol, range_=range_)
+        hit = fetch_yahoo_chart(symbol, range_=range_, start=start, end=end)
         if hit is not None:
             return {"status": "ok", **hit, "tried": tried, "error": None}
     return {
@@ -186,12 +198,13 @@ def fetch_holding_price(code: str, range_: str = "1mo") -> dict:
     }
 
 
-def fetch_holding_prices(codes: Iterable[str], range_: str = "1mo") -> dict:
+def fetch_holding_prices(codes: Iterable[str], range_: str = "1mo", start=None,
+                         end=None) -> dict:
     """Download several holdings; keys are the original holding codes."""
     out: dict[str, dict] = {}
     for code in codes:
         key = str(code or "").strip()
         if not key or key in out:
             continue
-        out[key] = fetch_holding_price(key, range_=range_)
+        out[key] = fetch_holding_price(key, range_=range_, start=start, end=end)
     return out

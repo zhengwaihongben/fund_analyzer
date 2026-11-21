@@ -11,12 +11,76 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from enum import Enum
 from typing import Any
 
 from fa.models.return_result import PortfolioReturnResult, PortfolioStatus
 
 #: Bumped whenever the valuation maths changes, so old runs stay explainable.
 MODEL_VERSION = "2.2.0"
+
+
+class LookAheadStatus(str, Enum):
+    """How far the holdings of a run can be trusted to be point-in-time.
+
+    A boolean cannot express the real situation today: the disclosure date is
+    *derived* (quarter end + 21 days), so a run may be PIT-correct in shape and
+    still rest on an estimated filing date.  Keeping the three states apart
+    lets V2.3 separate strict results from estimated ones.
+    """
+
+    VERIFIED_SAFE = "verified-safe"      # disclosed before the target date, date known
+    ESTIMATED_DISCLOSURE = "estimated-disclosure"  # PIT rule applied to an estimated date
+    UNSAFE = "unsafe"                    # holdings disclosed after the target date
+    UNKNOWN = "unknown"
+
+    @property
+    def is_strictly_safe(self) -> bool:
+        return self is LookAheadStatus.VERIFIED_SAFE
+
+    @classmethod
+    def parse(cls, value: Any) -> "LookAheadStatus":
+        if isinstance(value, cls):
+            return value
+        text = str(value or "").strip().lower()
+        for member in cls:
+            if member.value == text:
+                return member
+        return cls.UNKNOWN
+
+
+def _coerce_date(value: Any) -> date | None:
+    """Accept a ``date``, a datetime or an ISO string (records carry strings)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+
+
+def resolve_look_ahead_status(
+    *, disclosure_date: date | None, disclosure_date_estimated: bool, target_date: date
+) -> LookAheadStatus:
+    """Classify a holdings selection against the target NAV date.
+
+    ``disclosure_date`` is an *estimate* (quarter end + a filing lag) until the
+    real filing date is known, so "the disclosure date is before the target"
+    only proves safety when the date is not estimated.
+    """
+    disclosure_day = _coerce_date(disclosure_date)
+    target_day = _coerce_date(target_date)
+    if disclosure_day is None or target_day is None:
+        return LookAheadStatus.UNKNOWN
+    if disclosure_day > target_day:
+        return LookAheadStatus.UNSAFE
+    if disclosure_date_estimated:
+        return LookAheadStatus.ESTIMATED_DISCLOSURE
+    return LookAheadStatus.VERIFIED_SAFE
 
 
 def new_run_id() -> str:
@@ -41,7 +105,7 @@ class EstimationRun:
     disclosure_date: date | None = None
     disclosure_date_estimated: bool = False
     holdings_source: str = ""
-    look_ahead_safe: bool = True
+    look_ahead_status: LookAheadStatus = LookAheadStatus.UNKNOWN
     timezone: str = "Asia/Shanghai"
     cutoff: str = "15:00"
 
@@ -50,6 +114,13 @@ class EstimationRun:
         if not self.fund_code:
             raise ValueError("EstimationRun.fund_code 不可為空")
         self.run_id = str(self.run_id or new_run_id())
+        if not isinstance(self.look_ahead_status, LookAheadStatus):
+            self.look_ahead_status = LookAheadStatus.parse(self.look_ahead_status)
+
+    @property
+    def look_ahead_safe(self) -> bool:
+        """True only when the holdings are strictly point-in-time."""
+        return self.look_ahead_status.is_strictly_safe
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -68,6 +139,7 @@ class EstimationRun:
             "disclosure_date_estimated": 1 if self.disclosure_date_estimated else 0,
             "holdings_source": self.holdings_source,
             "look_ahead_safe": 1 if self.look_ahead_safe else 0,
+            "look_ahead_status": self.look_ahead_status.value,
             "timezone": self.timezone,
             "cutoff": self.cutoff,
         }

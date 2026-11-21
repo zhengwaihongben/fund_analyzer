@@ -82,7 +82,8 @@ class EquityCalculatorTests(unittest.TestCase):
         only_base = prices([(BASE, 100.0)])
         result = calculate_asset(asset(), base_date=BASE, target_date=TARGET,
                                  prices=only_base, fx=usd_fx())
-        self.assertTrue(result.is_ok)
+        self.assertTrue(result.is_usable)
+        self.assertEqual(result.status, ReturnStatus.STALE_PRICE)
         self.assertTrue(any("落後" in w for w in result.warnings))
 
     def test_series_starting_after_target_is_missing(self) -> None:
@@ -108,7 +109,8 @@ class EquityCalculatorTests(unittest.TestCase):
         result = calculate_asset(asset(), base_date=date(2025, 6, 3),
                                  target_date=date(2025, 6, 6), prices=one_behind,
                                  fx=fx)
-        self.assertTrue(result.is_ok)
+        self.assertTrue(result.is_usable)
+        self.assertEqual(result.status, ReturnStatus.STALE_PRICE)
         self.assertTrue(any("落後" in w for w in result.warnings))
 
     def test_raw_close_fallback_warns(self) -> None:
@@ -145,10 +147,30 @@ class EquityCalculatorTests(unittest.TestCase):
     def test_currency_cny_alias(self) -> None:
         result = calculate_asset(asset(currency="RMB"), base_date=BASE,
                                  target_date=TARGET,
-                                 prices=prices([(BASE, 100.0), (TARGET, 110.0)]),
+                                 prices=prices([(BASE, 100.0), (TARGET, 110.0)],
+                                               currency="RMB"),
                                  fx=None)
         self.assertTrue(result.is_ok)
         self.assertEqual(result.fx_return, 0.0)
+
+    def test_declared_vs_quote_currency_mismatch_is_rejected(self) -> None:
+        result = calculate_asset(
+            asset(currency="USD"), base_date=BASE, target_date=TARGET,
+            prices=prices([(BASE, 100.0), (TARGET, 110.0)], currency="HKD"),
+            fx=usd_fx(),
+        )
+        self.assertEqual(result.status, ReturnStatus.CURRENCY_MISMATCH)
+        self.assertFalse(result.is_usable)
+        self.assertIsNone(result.return_cny)
+
+    def test_fx_series_currency_must_match(self) -> None:
+        result = calculate_asset(
+            asset(currency="USD"), base_date=BASE, target_date=TARGET,
+            prices=prices([(BASE, 100.0), (TARGET, 110.0)], currency="USD"),
+            fx=FxSeries.from_pairs("EUR", [(BASE, 7.6), (TARGET, 7.7)], source="test"),
+        )
+        self.assertEqual(result.status, ReturnStatus.MISSING_FX)
+        self.assertTrue(any("匯率序列貨幣" in w for w in result.warnings))
 
 
 class EtfCalculatorTests(unittest.TestCase):
@@ -165,6 +187,7 @@ class EtfCalculatorTests(unittest.TestCase):
             prices=prices([(BASE, 100.0), (TARGET, 105.0)], currency="USD"),
             fx=usd_fx(),
         )
+        self.assertEqual(result.status, ReturnStatus.CURRENCY_MISMATCH)
         self.assertTrue(any("不一致" in w for w in result.warnings))
 
     def test_etf_identifies_currency_from_quote(self) -> None:
@@ -211,7 +234,22 @@ class CashCalculatorTests(unittest.TestCase):
 
     def test_different_day_counts(self) -> None:
         self.assertLess(cash_return(0.02, 1), cash_return(0.02, 10))
-        self.assertEqual(cash_return(0.02, 0), 0.0)
+
+    def test_non_positive_days_is_an_input_error(self) -> None:
+        """V2.2.1 review P2-11: no silent 0 % for a broken holding period."""
+        with self.assertRaises(ReturnCalculatorError):
+            cash_return(0.02, 0)
+        with self.assertRaises(ReturnCalculatorError):
+            cash_return(0.02, -5)
+
+    def test_non_positive_days_yields_invalid_input(self) -> None:
+        result = calculate_asset(
+            asset(AssetType.CASH, currency="CNY", interest_rate=0.02),
+            base_date=date(2025, 6, 30), target_date=date(2025, 6, 30),
+            prices=None, fx=None,
+        )
+        self.assertIs(result.status, ReturnStatus.INVALID_INPUT)
+        self.assertFalse(result.is_usable)
 
     def test_manual_rate_is_used(self) -> None:
         result = calculate_asset(
@@ -263,6 +301,19 @@ class FxCalculatorTests(unittest.TestCase):
     def test_missing_rate_is_not_invented(self) -> None:
         outcome = compute_fx_return("USD", None, BASE, TARGET)
         self.assertEqual(outcome.status, ReturnStatus.MISSING_FX)
+
+    def test_series_without_a_declared_base_currency_is_rejected(self) -> None:
+        # 只有「USD 序列」不足以說明分母；沒有 CNY 聲明就不能假設是 CNY per USD。
+        fx = FxSeries.from_pairs("USD", [(BASE, 7.00), (TARGET, 7.07)], source="test")
+        fx.base_currency = ""
+        outcome = compute_fx_return("USD", fx, BASE, TARGET)
+        self.assertEqual(outcome.status, ReturnStatus.MISSING_FX)
+        self.assertTrue(any("基準貨幣" in note for note in outcome.warnings))
+
+    def test_from_pairs_declares_cny_by_default(self) -> None:
+        fx = FxSeries.from_pairs("USD", [(BASE, 7.00), (TARGET, 7.07)], source="test")
+        self.assertEqual(fx.base_currency, "CNY")
+        self.assertTrue(compute_fx_return("USD", fx, BASE, TARGET).ok)
 
 
 class RegistryTests(unittest.TestCase):

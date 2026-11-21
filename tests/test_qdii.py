@@ -11,7 +11,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -33,6 +33,8 @@ from fa.analysis.valuation_dates import (
 )
 from fa.data.fund_info import resolve_fund_mode
 from fa.data.fx import rate_on
+from fa.data.fx_pipeline import FxUpdateOutcome
+from fa.models.market_data import AvailabilitySource, FxSeries, PricePoint
 from fa.data import holdings as holdings_data_mod
 from fa.data import qdii_holdings as qdii_holdings_mod
 from fa.data.qdii_holdings import (
@@ -385,16 +387,38 @@ class EstimateQdiiNavTests(unittest.TestCase):
         nav.to_csv(self.save / "000369_daily_nav.csv", index=False)
 
         self.holdings = pd.DataFrame([
+            # asset_type 是「來源聲明的類型」（Eastmoney 股票投资明细表），
+            # 分類器不再由 ticker 格式推測類型。
             {"ticker": "LLY", "name": "礼来", "weight": 0.5, "currency_hint": "USD",
              "market": "US", "quarter": "2025Q1", "holding_date": "2025-03-31",
-             "disclosure_date": "2025-04-21"},
+             "disclosure_date": "2025-04-21", "asset_type": "equity"},
             {"ticker": "MISSING", "name": "無行情", "weight": 0.3,
              "currency_hint": "USD", "market": "US", "quarter": "2025Q1",
-             "holding_date": "2025-03-31", "disclosure_date": "2025-04-21"},
+             "holding_date": "2025-03-31", "disclosure_date": "2025-04-21",
+             "asset_type": "equity"},
         ])
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed_fx(self, repository):
+        """FX rows published before the estimate instant; no network involved."""
+        points = []
+        for day, rate in ((date(2025, 6, 6), 7.00), (date(2025, 6, 9), 7.07)):
+            points.append(PricePoint(
+                price_date=day, close=rate,
+                market_timestamp=datetime.combine(day - timedelta(days=1),
+                                                  datetime.min.time(), tzinfo=timezone.utc),
+                available_at=datetime(day.year, day.month, day.day, 0, 30,
+                                      tzinfo=timezone.utc) + timedelta(days=1),
+                availability_source=AvailabilitySource.INFERRED,
+                availability_note="test",
+                fetched_at=datetime(2025, 6, 10, tzinfo=timezone.utc),
+                market="FX", currency="CNY", available_price_type="fx_close",
+                used_price_type="fx_close", source="test",
+            ))
+        repository.save_fx(FxSeries.from_bars("USD", points, source="test",
+                                              base_currency="CNY"))
 
     def _run(self, as_of=datetime(2025, 6, 10, 10, 0), holdings=None, repository=None):
         prices = {
@@ -425,15 +449,19 @@ class EstimateQdiiNavTests(unittest.TestCase):
             "disclosure_date": "2025-04-21", "source": "test", "cache_hit": False,
             "holdings_scope": "top10", "history_available": False,
         }
+        if repository is not None:
+            self._seed_fx(repository)
         with mock.patch.multiple(
             "fa.analysis.nav_estimator",
             fetch_qdii_holdings=mock.DEFAULT,
             fetch_holding_prices=mock.DEFAULT,
             fetch_fx_rates=mock.DEFAULT,
+            update_fx=mock.DEFAULT,
         ) as m:
             m["fetch_qdii_holdings"].return_value = portfolio
             m["fetch_holding_prices"].return_value = prices
             m["fetch_fx_rates"].return_value = fx
+            m["update_fx"].return_value = FxUpdateOutcome()
             return estimate_qdii_nav("000369", self.save, as_of=as_of,
                                      repository=repository)
 
@@ -484,7 +512,13 @@ class EstimateQdiiNavTests(unittest.TestCase):
                 self.assertEqual(runs[0]["status"], "partial")
                 self.assertEqual(runs[0]["target_nav_date"], record["target_nav_date"])
                 inputs = repo.estimation_inputs(runs[0]["run_id"])
-                self.assertEqual(inputs["estimated_nav"], record["estimated_nav"])
+                # The stored payload is the *input* snapshot, not the summary:
+                # it must contain the prices/FX actually used so the run can be
+                # reproduced (V2.2.1 review P1-5).
+                self.assertEqual(inputs["base_nav"], record["base_nav"])
+                self.assertEqual(inputs["model_version"], "2.2.0")
+                self.assertTrue(inputs["assets"])
+                self.assertNotIn("estimated_nav", inputs)
                 self.assertEqual(repo.nav_on_or_before("000369", date(2025, 6, 10))[1], 1.25)
             finally:
                 repo.close()
@@ -513,6 +547,8 @@ class EstimateQdiiNavTests(unittest.TestCase):
         self.assertEqual(sorted(back["quarter"].unique()), ["2026Q2", "2026Q3"])
         self.assertAlmostEqual(
             float(back.loc[back["ticker"] == "JNJ", "weight"].iloc[0]), 0.0733)
+        # 離線 fallback 必須保留來源聲明的資產類型，否則整批持倉都會變成 unknown。
+        self.assertEqual(set(back["asset_type"]), {"equity"})
 
     def test_saved_snapshot_records_the_real_source(self):
         """首頁 fallback 的資料不可被記成 eastmoney-archives。"""
@@ -560,12 +596,22 @@ class EstimateQdiiNavTests(unittest.TestCase):
 
         self.assertEqual(snapshots[0].source, "eastmoney-archives")
 
-    def test_repeat_run_for_same_target_replaces_history_row(self):
-        self._run()
-        self._run()
+    def test_repeat_run_for_same_target_keeps_both_runs(self):
+        """Two estimates for the same target date are two runs, not one.
+
+        V2.2.1 review P1-6: keying history on ``target_nav_date`` silently
+        destroyed the earlier estimate; ``run_id`` is the identity.
+        """
+        first = self._run()
+        second = self._run()
 
         history = read_history(self.save / "000369_qdii_estimates.csv")
-        self.assertEqual(len(history), 1, "同一估值日只保留一行")
+        self.assertEqual(len(history), 2)
+        self.assertEqual(
+            sorted(history["run_id"].astype(str).tolist()),
+            sorted([first["run_id"], second["run_id"]]),
+        )
+        self.assertNotEqual(first["run_id"], second["run_id"])
 
     def test_up_to_date_when_official_nav_already_published(self):
         as_of = datetime(2025, 6, 10, 10, 0)
@@ -604,7 +650,7 @@ class EstimateQdiiNavTests(unittest.TestCase):
 
     def test_missing_nav_file_and_no_download(self):
         (self.save / "000369_daily_nav.csv").unlink()
-        with mock.patch("fa.analysis.nav_estimator.fetch_nav",
+        with mock.patch("fa.data.nav.fetch_nav",
                         return_value=pd.DataFrame()):
             record = estimate_qdii_nav("000369", self.save)
         self.assertEqual(record["status"], "insufficient-data")

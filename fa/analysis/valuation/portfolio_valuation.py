@@ -51,7 +51,7 @@ def value_portfolio(
     warnings: list[str] = []
 
     for result in results:
-        if result.is_ok and result.return_cny is not None:
+        if result.is_usable:
             covered += result.weight
             estimated += result.contribution
             local += result.local_contribution or 0.0

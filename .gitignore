@@ -35,6 +35,14 @@ desktop.ini
 
 # 沙箱測試殘留目錄（無法刪除時忽略）
 _tmp/
+_pytmp*/
+_a10_out/
+test_evidence/
+pytest-cache-files-*/
+
+# 提交給審查者的打包檔
+*.zip
+dist/
 
 # V2 資料目錄（資料庫與匯出屬產出物，不入版控）
 data/database/*.db
@@ -44,3 +52,8 @@ data/cache/*
 data/exports/*/*.csv
 data/exports/*/*.json
 data/exports/*/*.xlsx
+
+_stage_e_out/
+
+# 開發用臨時驗證資料庫
+_scratch/

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable
 
-from fa.models.return_result import ReturnStatus
+from fa.models.return_result import ReturnStatus, USABLE_STALE_STATUSES
 
 
 class QualityGrade(str, Enum):
@@ -41,20 +41,15 @@ HARD_FAILURES = frozenset(
         ReturnStatus.MISSING_TARGET_PRICE,
         ReturnStatus.MISSING_BASE_PRICE,
         ReturnStatus.MISSING_CURRENCY,
+        ReturnStatus.CURRENCY_MISMATCH,
         ReturnStatus.MISSING_FX,
         ReturnStatus.UNSUPPORTED_ASSET,
+        ReturnStatus.INVALID_INPUT,
     }
 )
 
 #: Statuses that keep the asset but lower confidence.
-SOFT_WARNINGS = frozenset(
-    {
-        ReturnStatus.STALE_PRICE,
-        ReturnStatus.STALE_BASE_PRICE,
-        ReturnStatus.STALE_FX,
-        ReturnStatus.STALE_BASE_FX,
-    }
-)
+SOFT_WARNINGS = USABLE_STALE_STATUSES
 
 
 @dataclass
@@ -64,6 +59,8 @@ class QualityReport:
     coverage_ratio: float = 0.0
     stale_weight: float = 0.0
     excluded_weight: float = 0.0
+    assumption_weight: float = 0.0
+    calendar_fallback: bool = False
     reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +70,8 @@ class QualityReport:
             "coverage_ratio": self.coverage_ratio,
             "stale_weight": self.stale_weight,
             "excluded_weight": self.excluded_weight,
+            "assumption_weight": self.assumption_weight,
+            "calendar_fallback": self.calendar_fallback,
             "reasons": list(self.reasons),
         }
 
@@ -82,6 +81,7 @@ def assess_quality(
     *,
     disclosure_date_estimated: bool = False,
     base_nav_fresh: bool = True,
+    calendar_fallback: bool = False,
 ) -> QualityReport:
     """Grade an estimation from its per-asset return results.
 
@@ -91,6 +91,7 @@ def assess_quality(
     score = 100.0
     stale_weight = 0.0
     excluded_weight = 0.0
+    assumption_weight = 0.0
     covered_weight = 0.0
     reasons: list[str] = []
 
@@ -103,15 +104,21 @@ def assess_quality(
             status = ReturnStatus(status)
         except ValueError:
             status = ReturnStatus.UNSUPPORTED_ASSET
-        if status.is_ok:
-            covered_weight += weight
+        usable = getattr(item, "is_usable", None)
+        if usable is None:
+            usable = status.is_usable
+        if not usable:
+            excluded_weight += weight
         elif status in SOFT_WARNINGS:
             covered_weight += weight
             stale_weight += weight
-        elif status in HARD_FAILURES:
-            excluded_weight += weight
         else:
-            excluded_weight += weight
+            covered_weight += weight
+        extra = getattr(item, "extra", None) or (
+            item.get("extra") if isinstance(item, dict) else None
+        ) or {}
+        if str(extra.get("rate_source", "")).lower() == "assumption":
+            assumption_weight += weight
 
     if stale_weight > 0:
         score -= min(30.0, stale_weight * 100.0 * 0.5)
@@ -129,6 +136,12 @@ def assess_quality(
     if not base_nav_fresh:
         score -= 10.0
         reasons.append("基準 NAV 並非目標日前最後一個交易日")
+    if assumption_weight > 0:
+        score -= min(15.0, assumption_weight * 100.0 * 0.3)
+        reasons.append(f"{assumption_weight * 100:.1f}% 的權重使用假設利率")
+    if calendar_fallback:
+        score -= 5.0
+        reasons.append("部分市場沒有假期表，交易日曆退回週末規則")
 
     score = max(0.0, min(100.0, score))
     return QualityReport(
@@ -137,5 +150,7 @@ def assess_quality(
         coverage_ratio=coverage,
         stale_weight=stale_weight,
         excluded_weight=excluded_weight,
+        assumption_weight=assumption_weight,
+        calendar_fallback=calendar_fallback,
         reasons=reasons,
     )

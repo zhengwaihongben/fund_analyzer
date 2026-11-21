@@ -105,6 +105,23 @@ warnings are plain strings stored on the result and the run record.
 * `fa.gui.*` imports `analysis`/`pipeline` only.
 * No module under `fa/analysis` writes files or SQL.
 
+Moved out of `nav_estimator.py` by the V2.2.1 review: asset construction →
+`fa/data/asset_classifier.py`, price loading (database first, then network, then
+persist) → its own helper, and all estimate persistence (JSON, history CSV,
+input snapshots) → `fa/data/estimation_storage.py`. The estimator now reads
+dates → base NAV → PIT holdings → market data → calculators → portfolio
+valuation → data quality → repository, and hands the finished record to the
+storage layer.
+
+Known remaining deviation (deferred by decision, V2.2.1): the legacy JSON
+serializer `_legacy_record()` still lives in `nav_estimator.py`. It will move to
+`fa/serialization/legacy_estimate.py` with a byte-compatible schema.
+
+V2.2.2 additions in this area: `build_assets()` also accepts the *source-declared*
+asset type (`asset_type` column on the holdings frame) and reads market metadata
+from the price series (`hit["market"]`) when no exchange is given; the
+repository writes `price.available_price_type`, never the compatibility alias.
+
 ## 7. GUI contract
 
 `QdiiEstimateWindow` displays, from one `EstimationResult` + `EstimationRun`:

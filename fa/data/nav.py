@@ -171,3 +171,27 @@ def fetch_nav(fund_code: str, save_dir: Path,
     raw.to_csv(out, index=False, encoding="utf-8-sig")
     log.info(f"[{fund_code}] 净值 {len(raw)} 条 → {out.name}")
     return raw
+
+
+def load_nav_csv(fund_code: str, save_dir) -> pd.DataFrame:
+    """Official NAV series (Date/NAV); falls back to a fresh download."""
+    save_dir = Path(save_dir)
+    path = save_dir / f"{fund_code}_daily_nav.csv"
+    if path.exists():
+        try:
+            frame = pd.read_csv(path)
+            frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+            frame["NAV"] = pd.to_numeric(frame["NAV"], errors="coerce")
+            frame = frame.dropna(subset=["Date", "NAV"]).sort_values("Date")
+            if not frame.empty:
+                return frame[["Date", "NAV"]].reset_index(drop=True)
+        except Exception as exc:  # noqa: BLE001 - 壞檔就重抓
+            log.warning("淨值緩存不可讀（%s），重新下載", exc)
+
+    frame = fetch_nav(fund_code, save_dir)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["Date", "NAV"])
+    frame = frame.copy()
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    frame["NAV"] = pd.to_numeric(frame["NAV"], errors="coerce")
+    return frame.dropna(subset=["Date", "NAV"]).sort_values("Date").reset_index(drop=True)

@@ -119,3 +119,10 @@ edit of an old one.
 * Slightly stale prices are kept with a warning; severely stale prices are
   excluded and reduce coverage.
 * Every price carries `source`, `price_type`, `price_date`, `retrieved_at`.
+* Vendor exchange names are normalised before a calendar is picked
+  (`NasdaqGS`/`NYQ` → US, `HKG` → HK, `JPX` → JP, `SIX Swiss Exchange` → CH,
+  `LSE` → GB); an unrecognised exchange falls back to the weekend-only calendar,
+  which sets `calendar_fallback=True` in the record and costs 5 quality points.
+* The date window fetched for market data is the valuation interval itself
+  (`start = base_date − 10 days`, `end = target_date`), so an estimate for an old
+  target date does not use this month's quotes.

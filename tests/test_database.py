@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fa.data.database import (
@@ -14,9 +14,11 @@ from fa.data.database import (
     connect,
     schema_version,
 )
+from fa.data.database.connection import DatabaseError
 from fa.models import (
     Asset,
     AssetType,
+    AvailabilitySource,
     EstimationResult,
     EstimationRun,
     FxSeries,
@@ -200,6 +202,192 @@ class MarketDataTests(DatabaseTestCase):
         self.repo.save_prices(make_prices())
         loaded = self.repo.load_prices("LLY", start=date(2026, 11, 13))
         self.assertEqual(len(loaded), 1)
+
+    def test_used_price_type_does_not_rewrite_the_stored_available_type(self) -> None:
+        # market_prices.price_type 記錄來源提供什麼；計算過後 used_price_type
+        # 可能被填成 close，不能因此把資料庫的 key 改掉。
+        prices = make_prices()
+        for point in prices.points:
+            point.used_price_type = "close"
+        self.repo.save_prices(prices)
+        self.repo.save_prices(prices)
+        with self.repo._conn:  # noqa: SLF001 - 測試直接看表
+            rows = self.repo._conn.execute(  # noqa: SLF001
+                "SELECT price_type FROM market_prices ORDER BY price_date"
+            ).fetchall()
+        self.assertEqual([row[0] for row in rows], ["close+adj_close", "close+adj_close"])
+
+    def test_upsert_without_timestamps_keeps_the_legacy_columns(self) -> None:
+        # 舊讀取路徑只認 price_timestamp / retrieved_at。新點沒有帶時間時，
+        # upsert 不可以把它們清成 NULL（COALESCE，不是直接覆蓋）。
+        moment = datetime(2026, 11, 13, 21, 0, tzinfo=timezone.utc)
+        stamped = make_prices()
+        for point in stamped.points:
+            point.market_timestamp = moment
+        self.repo.save_prices(stamped)
+
+        bare = make_prices()  # 沒有 market_timestamp / fetched_at
+        self.repo.save_prices(bare)
+
+        rows = self.repo._conn.execute(  # noqa: SLF001 - 測試直接看表
+            "SELECT price_timestamp, retrieved_at, market_timestamp FROM market_prices"
+        ).fetchall()
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["price_timestamp"], "2026-11-13T21:00:00Z")
+            self.assertIsNotNone(row["retrieved_at"])
+            self.assertEqual(row["market_timestamp"], "2026-11-13T21:00:00Z")
+
+    def test_fx_without_base_currency_is_rejected(self) -> None:
+        fx = FxSeries.from_pairs("USD", [(date(2026, 11, 12), 7.10)])
+        fx.base_currency = ""
+        with self.assertRaises(DatabaseError):
+            self.repo.save_fx(fx)
+        rows = self.repo._conn.execute(  # noqa: SLF001
+            "SELECT COUNT(*) AS n FROM fx_rates"
+        ).fetchone()
+        self.assertEqual(rows["n"], 0)
+
+    def test_fx_with_non_cny_base_is_rejected(self) -> None:
+        fx = FxSeries.from_pairs("USD", [(date(2026, 11, 12), 7.10)], base_currency="EUR")
+        with self.assertRaises(DatabaseError):
+            self.repo.save_fx(fx)
+        rows = self.repo._conn.execute(  # noqa: SLF001 - 測試直接看表
+            "SELECT COUNT(*) AS n FROM fx_rates"
+        ).fetchone()
+        self.assertEqual(rows["n"], 0)
+
+    def _stored(self, column: str) -> list:
+        rows = self.repo._conn.execute(  # noqa: SLF001 - 測試直接看最終狀態
+            f"SELECT {column} FROM market_prices ORDER BY price_date"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def _stored_dividends(self) -> list:
+        return self._stored("dividend")
+
+    def _stored_splits(self) -> list:
+        return self._stored("split")
+
+    def _revision_rows(self) -> list:
+        return self.repo._conn.execute(  # noqa: SLF001 - 測試直接看表
+            "SELECT close, dividend, split, reason FROM price_revisions ORDER BY revision_id"
+        ).fetchall()
+
+    def test_dividend_only_change_is_recorded_as_a_revision(self) -> None:
+        prices = make_prices()
+        for point in prices.points:
+            point.dividend = 0.2
+        self.repo.save_prices(prices)
+
+        updated = make_prices()  # 價格完全相同，只有股利改變
+        for point in updated.points:
+            point.dividend = 0.5
+        self.repo.save_prices(updated)
+
+        revisions = self._revision_rows()
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(revisions[0]["dividend"], 0.2)
+        self.assertEqual(sorted(r["close"] for r in revisions), [800.0, 810.0])  # 舊值保留
+        self.assertIn("dividend", revisions[0]["reason"])
+        self.assertNotIn("close", revisions[0]["reason"])
+        self.assertEqual(self._stored_dividends(), [0.5, 0.5])  # 現值已更新
+
+    def test_split_only_change_is_recorded_as_a_revision(self) -> None:
+        prices = make_prices()
+        for point in prices.points:
+            point.split = 1.0
+        self.repo.save_prices(prices)
+
+        updated = make_prices()
+        for point in updated.points:
+            point.split = 2.0
+        self.repo.save_prices(updated)
+
+        revisions = self._revision_rows()
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(revisions[0]["split"], 1.0)
+        self.assertEqual(sorted(r["close"] for r in revisions), [800.0, 810.0])  # 舊值保留
+        self.assertIn("split", revisions[0]["reason"])
+        self.assertNotIn("close", revisions[0]["reason"])
+        self.assertEqual(self._stored_splits(), [2.0, 2.0])  # 現值已更新
+
+    def test_availability_enrichment_is_not_a_revision(self) -> None:
+        # 補上 available_at / note 是「補充」，不是「改寫」，不該塞滿 revision。
+        self.repo.save_prices(make_prices())
+        enriched = make_prices()
+        for point in enriched.points:
+            point.available_at = datetime(2026, 11, 13, 21, 30, tzinfo=timezone.utc)
+            point.availability_source = AvailabilitySource.INFERRED
+            point.availability_note = "market close + 30 分鐘"
+        self.repo.save_prices(enriched)
+        self.assertEqual(self._revision_rows(), [])
+        loaded = self.repo.load_prices("LLY")
+        self.assertEqual(loaded.points[-1].availability_source, AvailabilitySource.INFERRED)
+
+    def test_dividend_not_provided_is_not_a_revision(self) -> None:
+        # dividend 的 upsert 是 COALESCE：新下載沒帶 dividend（None）不會清掉舊值，
+        # 資料庫最終仍是 0.2，所以不該記一筆沒發生的修訂。
+        prices = make_prices()
+        for point in prices.points:
+            point.dividend = 0.2
+        self.repo.save_prices(prices)
+
+        bare = make_prices()  # dividend 未提供（None）
+        self.repo.save_prices(bare)
+
+        self.assertEqual(self._revision_rows(), [])
+        self.assertEqual(self._stored_dividends(), [0.2, 0.2])
+
+    def test_split_not_provided_is_not_a_revision(self) -> None:
+        prices = make_prices()
+        for point in prices.points:
+            point.split = 2.0
+        self.repo.save_prices(prices)
+
+        bare = make_prices()
+        self.repo.save_prices(bare)
+
+        self.assertEqual(self._revision_rows(), [])
+        self.assertEqual(self._stored_splits(), [2.0, 2.0])
+
+    def test_upsert_without_market_currency_source_keeps_the_stored_values(self) -> None:
+        # market / currency / source 是 enrichment：新資料沒帶（空字串）時不能把
+        # 舊值蓋成空白，否則舊列會失去市場與幣別資訊。
+        self.repo.save_prices(make_prices())
+        bare = PriceSeries(
+            ticker="LLY",
+            points=[
+                PricePoint(price_date=date(2026, 11, 12), close=800.0, adj_close=800.0),
+                PricePoint(price_date=date(2026, 11, 13), close=810.0, adj_close=810.0),
+            ],
+        )
+        self.repo.save_prices(bare)
+
+        rows = self.repo._conn.execute(  # noqa: SLF001 - 測試直接看最終狀態
+            "SELECT market, currency, source FROM market_prices ORDER BY price_date"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["market"], "US")
+            self.assertEqual(row["currency"], "USD")
+            self.assertEqual(row["source"], "unit-test")
+
+    def test_timestamps_are_stored_as_utc_with_z(self) -> None:
+        shanghai = timezone(timedelta(hours=8))
+        prices = make_prices()
+        for point in prices.points:
+            point.market_timestamp = datetime(2026, 11, 14, 5, 0, tzinfo=shanghai)
+        self.repo.save_prices(prices)
+        rows = self.repo._conn.execute(  # noqa: SLF001
+            "SELECT market_timestamp, price_timestamp FROM market_prices"
+        ).fetchall()
+        for row in rows:
+            self.assertEqual(row["market_timestamp"], "2026-11-13T21:00:00Z")
+            self.assertEqual(row["price_timestamp"], "2026-11-13T21:00:00Z")
+        loaded = self.repo.load_prices("LLY")
+        self.assertEqual(loaded.points[-1].market_timestamp,
+                         datetime(2026, 11, 13, 21, 0, tzinfo=timezone.utc))
 
     def test_fx_round_trip(self) -> None:
         fx = FxSeries.from_pairs(

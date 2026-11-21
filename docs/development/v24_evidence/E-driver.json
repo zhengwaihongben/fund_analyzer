@@ -1,0 +1,130 @@
+{
+  "python": "3.10.9",
+  "startup_readings": [
+    1.494,
+    1.649,
+    1.547
+  ],
+  "screen": [
+    1536,
+    864
+  ],
+  "title": "Fund Analyzer — 基金分析工具",
+  "E-03_1024": {
+    "width": 1280,
+    "height": 960,
+    "scale": 1.25
+  },
+  "E-03_min_size_ok": true,
+  "E-03_1920": {
+    "width": 1910,
+    "height": 1042,
+    "scale": 1.25
+  },
+  "E-08_history_rows": 33,
+  "E-08_shot": {
+    "width": 1600,
+    "height": 992,
+    "scale": 1.25
+  },
+  "E-09_dialog": {
+    "shotsize": [
+      1920,
+      1080
+    ],
+    "exited_by": "capture callback (modal loop still active)"
+  },
+  "E-09_returncode": 0,
+  "E-01_analysis_seconds": 36.625,
+  "E-01_analysis_ok": true,
+  "E-01_result_files": 13,
+  "E-01_status": "分析完成 — 13 個文件（4 個 HTML 報告）",
+  "E-01_shot": {
+    "width": 1600,
+    "height": 992,
+    "scale": 1.25
+  },
+  "E-01_master_report": "C:\\Users\\user\\Desktop\\Finance\\codes\\alipay_funds\\fund_analyzer\\_stage_e_out\\000369\\000369_master_report.html",
+  "E-01_history_after_analysis": [
+    {
+      "run_id": "7d28dc9ac8dd488cb2fd9abd01817b80",
+      "fund_code": "000369",
+      "target_nav_date": "2026-11-20",
+      "base_nav_date": "2026-11-19",
+      "created_at": "2026-11-21T16:46:57",
+      "model_version": "2.2.0",
+      "status": "partial",
+      "estimated_nav": 2.6865,
+      "estimated_return": 0.00019708246717477256,
+      "coverage_ratio": 0.0946999999999999,
+      "data_quality": "low"
+    }
+  ],
+  "E-01_qdii_open": true,
+  "E-01_qdii_seconds": 0.0,
+  "E-01_qdii_ok": true,
+  "E-01_qdii_run_id": "2db5c88189e245688460e22a4762a735",
+  "E-01_qdii_persisted": true,
+  "E-01_qdii_mode": "live",
+  "E-01_qdii_shot": {
+    "width": 1475,
+    "height": 950,
+    "scale": 1.25
+  },
+  "E-04_shot": {
+    "width": 1475,
+    "height": 950,
+    "scale": 1.25
+  },
+  "E-04_ticker_width": 82,
+  "E-04_row_count": 3,
+  "E-06_window": true,
+  "E-06_seconds": 0.406,
+  "E-06_state": "completed",
+  "E-06_events": [
+    "progress:建立 StrategySpec 並開始回測…",
+    "progress:回測完成，讀取已保存結果…",
+    "result:True"
+  ],
+  "E-06_event_count": 3,
+  "E-06_progress_then_single_result": true,
+  "E-06_shot": {
+    "width": 1350,
+    "height": 950,
+    "scale": 1.25
+  },
+  "E-06_run_id": "2b450179b9960dabdc199ea74b54deb9fc67c5d7e6c96507262fb1b3fa964a6b",
+  "E-06_created": false,
+  "E-06_metrics": {
+    "sessions": 11,
+    "trades": 2,
+    "cagr": -0.48146523865093394,
+    "max_drawdown": -0.030336699999999994
+  },
+  "E-06_equity_rows": 11,
+  "E-10_export_backtest": "C:\\Users\\user\\Desktop\\Finance\\codes\\alipay_funds\\fund_analyzer\\output\\reports\\2b450179b9960dabdc199ea74b54deb9fc67c5d7e6c96507262fb1b3fa964a6b.md",
+  "E-07_was_running": "running",
+  "E-07_close_seconds": 0.203,
+  "E-07_bounded": true,
+  "E-10_estimation_run": "2db5c88189e245688460e22a4762a735",
+  "E-10_export_estimation": "C:\\Users\\user\\Desktop\\Finance\\codes\\alipay_funds\\fund_analyzer\\output\\reports\\2db5c88189e245688460e22a4762a735_estimate.md",
+  "E-10_history_window": true,
+  "E-10_shot": {
+    "width": 1475,
+    "height": 900,
+    "scale": 1.25
+  },
+  "E-01_shutdown_seconds": 0.594,
+  "E-07_orphan": "(no python process with fund_analyzer_gui.py in its command line)",
+  "E-08_reopen_rows": 35,
+  "E-08_reopen_shot": {
+    "width": 1075,
+    "height": 850,
+    "scale": 1.25
+  },
+  "log": [
+    "E-02 cold start: 1.494 s (process wall 2.122 s)",
+    "E-02 cold start: 1.649 s (process wall 2.213 s)",
+    "E-02 cold start: 1.547 s (process wall 2.072 s)"
+  ]
+}

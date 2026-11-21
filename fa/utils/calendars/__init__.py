@@ -32,6 +32,7 @@ _ALIASES = {
     "HK": "HK",
     "HKEX": "HK",
     "HKG": "HK",
+    "HKSE": "HK",
     "CN": "CN",
     "SH": "CN",
     "SZ": "CN",
@@ -41,6 +42,55 @@ _ALIASES = {
     "TSE": "JP",
     "TYO": "JP",
     "JPX": "JP",
+    "CH": "CH",
+    "SIX": "CH",
+    "SWX": "CH",
+    "GB": "GB",
+    "LSE": "GB",
+    "UK": "GB",
+    "DE": "DE",
+    "XETRA": "DE",
+    "GER": "DE",
+    "FRA": "DE",
+    "FR": "FR",
+    "PAR": "FR",
+    "NL": "NL",
+    "AMS": "NL",
+    "CA": "CA",
+    "TO": "CA",
+    "AU": "AU",
+    "AX": "AU",
+}
+
+#: Yahoo's ``exchangeName`` values (and their variants) mapped onto market codes.
+_EXCHANGE_NAMES = {
+    "NASDAQS": "US",
+    "NASDAQGS": "US",
+    "NASDAQGM": "US",
+    "NASDAQCM": "US",
+    "NMS": "US",
+    "NGM": "US",
+    "NCM": "US",
+    "NYQ": "US",
+    "NYE": "US",
+    "PCX": "US",
+    "ASE": "US",
+    "BATS": "US",
+    "SIX SWISS EXCHANGE": "CH",
+    "SIX": "CH",
+    "LONDON STOCK EXCHANGE": "GB",
+    "LSE": "GB",
+    "LSE AIM": "GB",
+    "XETRA": "DE",
+    "GERMANY": "DE",
+    "EURONEXT PARIS": "FR",
+    "EURONEXT AMSTERDAM": "NL",
+    "HONG KONG STOCK EXCHANGE": "HK",
+    "HKSE": "HK",
+    "TOKYO STOCK EXCHANGE": "JP",
+    "JPX": "JP",
+    "TORONTO STOCK EXCHANGE": "CA",
+    "ASX": "AU",
 }
 
 
@@ -62,10 +112,32 @@ class FallbackCalendar(HolidayCalendar):
         return frozenset()
 
 
-def normalise_market(market: str | None) -> str:
-    if not market:
+def normalise_exchange(name: str | None) -> str:
+    """Map an exchange name/market alias onto a canonical market code.
+
+    ``"NasdaqGS"``, ``"NMS"`` and ``"NYQ"`` all mean the US calendar; leaving
+    them as-is silently dropped the entire US holiday table.
+    """
+    if not name:
         return ""
-    return _ALIASES.get(str(market).strip().upper(), str(market).strip().upper())
+    key = str(name).strip().upper()
+    if key in _ALIASES:
+        return _ALIASES[key]
+    if key in _EXCHANGE_NAMES:
+        return _EXCHANGE_NAMES[key]
+    for prefix, code in _EXCHANGE_NAMES.items():
+        if key.startswith(prefix):
+            return code
+    return key
+
+
+def normalise_market(market: str | None) -> str:
+    return normalise_exchange(market)
+
+
+def calendar_is_fallback(calendar: object) -> bool:
+    """True when ``calendar`` has no holiday table (weekends only)."""
+    return bool(getattr(calendar, "is_fallback", False))
 
 
 def get_calendar(market: str | None) -> HolidayCalendar:
@@ -88,9 +160,10 @@ def get_calendar(market: str | None) -> HolidayCalendar:
 
 
 def calendar_for(market: str | None = None, ticker: str | None = None) -> HolidayCalendar:
-    """Best-effort calendar from a market code or a ticker suffix."""
-    if market:
-        return get_calendar(market)
+    """Best-effort calendar from an exchange name, market code or ticker suffix."""
+    code = normalise_exchange(market)
+    if code in ("US", "HK", "CN", "JP"):
+        return get_calendar(code)
     if ticker and "." in ticker:
         suffix = ticker.rsplit(".", 1)[1].upper()
         suffix_map = {
@@ -105,7 +178,7 @@ def calendar_for(market: str | None = None, ticker: str | None = None) -> Holida
             "AX": "AU",
         }
         return get_calendar(suffix_map.get(suffix, suffix))
-    return get_calendar(market)
+    return get_calendar(code)
 
 
 def available_markets() -> list[str]:
@@ -124,6 +197,8 @@ __all__ = [
     "FallbackCalendar",
     "get_calendar",
     "calendar_for",
+    "calendar_is_fallback",
+    "normalise_exchange",
     "normalise_market",
     "available_markets",
 ]

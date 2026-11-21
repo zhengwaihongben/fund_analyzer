@@ -29,9 +29,13 @@ RATE_SOURCES = ("policy_rate", "market_rate", "manual", "assumption")
 
 
 def cash_return(annual_rate: float, days: int) -> float:
-    """Compound a fixed annual rate over ``days`` calendar days."""
+    """Compound a fixed annual rate over ``days`` calendar days.
+
+    ``days`` must be positive: a zero or negative holding period is an input
+    error, not a 0 % return.
+    """
     if days <= 0:
-        return 0.0
+        raise ReturnCalculatorError(f"現金計息天數必須為正，收到 {days}")
     return (1.0 + annual_rate / 365.0) ** days - 1.0
 
 
@@ -68,6 +72,15 @@ class CashReturnCalculator:
         rate = float(rate)
 
         days = (target_date - base_date).days
+        if days <= 0:
+            return AssetReturnResult(
+                asset_id=asset.asset_id,
+                status=ReturnStatus.INVALID_INPUT,
+                weight=asset.weight,
+                currency=currency,
+                warnings=[f"現金計息天數必須為正（收到 {days} 天），無法估值"],
+                extra={"annual_rate": rate, "rate_source": source, "days": days},
+            )
         local = cash_return(rate, days)
 
         fx_outcome = convert_to_cny(currency, fx, base_date, target_date, calendar=calendar)
@@ -87,7 +100,9 @@ class CashReturnCalculator:
 
         return AssetReturnResult(
             asset_id=asset.asset_id,
-            status=ReturnStatus.OK,
+            # 過期的匯率仍然可用，但狀態必須一路傳到 Data Quality，否則這部分
+            # 權重不會被計入 stale_weight。
+            status=fx_outcome.status,
             weight=asset.weight,
             currency=currency,
             local_return=local,

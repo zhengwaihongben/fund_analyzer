@@ -13,6 +13,27 @@ from fa.utils.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+def _bounded_timeout(timeout: float = 2.0) -> float:
+    """Clamp a caller-supplied close wait to two seconds (spec T-7)."""
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return 2.0
+    if value != value:  # NaN
+        return 2.0
+    return min(max(value, 0.0), 2.0)
+
+
+def _fetch_post_market_task(fund_code, save_dir, result_queue):
+    """Background fetch.  Module level: it must reference no window object."""
+    try:
+        data = fetch_post_market_estimate(fund_code, save_dir)
+        result_queue.put(("ok", data))
+    except Exception as exc:  # noqa: BLE001 - 交給主線程顯示
+        log.exception("盤後監控更新失敗")
+        result_queue.put(("error", exc))
+
+
 class PostMarketWindow(tk.Toplevel):
     def __init__(self, master, fund_code, save_dir, on_close=None):
         super().__init__(master)
@@ -83,16 +104,12 @@ class PostMarketWindow(tk.Toplevel):
             return
         self._fetching = True
 
-        # 用線程去拉數據，防止卡 UI；線程內不觸碰任何 Tk 控件
-        def task():
-            try:
-                data = fetch_post_market_estimate(self.fund_code, self.save_dir)
-                self.result_queue.put(("ok", data))
-            except Exception as e:
-                log.exception("盤後監控更新失敗")
-                self.result_queue.put(("error", e))
-
-        self._fetch_thread = threading.Thread(target=task, daemon=True)
+        self._fetch_thread = threading.Thread(
+            target=_fetch_post_market_task,
+            args=(self.fund_code, self.save_dir, self.result_queue),
+            daemon=True,
+            name="post-market-worker",
+        )
         self._fetch_thread.start()
 
     def _poll_result_queue(self):
@@ -184,7 +201,7 @@ class PostMarketWindow(tk.Toplevel):
                 reg_str, post_str, change_str
             ), tags=(tag,))
 
-    def close(self):
+    def close(self, *, timeout: float = 2.0):
         """停止刷新循環：取消定時器、等拉取線程退出，再銷毀窗口。"""
         if self._closed:
             return
@@ -201,7 +218,7 @@ class PostMarketWindow(tk.Toplevel):
 
         thread = self._fetch_thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            thread.join(timeout=_bounded_timeout(timeout))
 
         try:
             self.destroy()
