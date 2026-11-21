@@ -57,3 +57,6 @@ _stage_e_out/
 
 # 開發用臨時驗證資料庫
 _scratch/
+
+# 保留空的 cache 目錄
+!data/cache/.gitkeep

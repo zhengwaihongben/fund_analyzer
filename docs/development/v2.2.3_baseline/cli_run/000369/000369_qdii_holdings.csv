@@ -1,0 +1,11 @@
+﻿ticker,name,weight,currency_hint,market,quarter,holding_date,disclosure_date,disclosure_date_estimated,asset_type
+LLY,礼来,0.1043,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+JNJ,强生,0.0733,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+ABBV,艾伯维,0.053200000000000004,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+MRK,默沙东,0.042,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+UNH,联合健康,0.038,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+ROP SW,罗氏控股股份公司,0.0339,CHF,SIX,2026Q3,2026-09-30,2026-10-21,True,equity
+NOVN,诺华,0.030899999999999997,CHF,SIX,2026Q3,2026-09-30,2026-10-21,True,equity
+AZN,阿斯利康(UK),0.029900000000000003,GBP,LSE,2026Q3,2026-09-30,2026-10-21,True,equity
+TMO,赛默飞世尔科技,0.0291,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity
+AMGN,安进,0.0263,USD,US,2026Q3,2026-09-30,2026-10-21,True,equity

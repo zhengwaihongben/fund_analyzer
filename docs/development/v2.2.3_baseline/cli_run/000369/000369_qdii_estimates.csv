@@ -1,0 +1,2 @@
+﻿run_id,computed_at,target_nav_date,base_nav_date,base_nav,estimated_nav,estimated_return,coverage_ratio,uncovered_weight,holdings_quarter,holdings_date,disclosure_date,disclosure_date_estimated,look_ahead_safe,look_ahead_status,holdings_source,data_quality,status,official_nav,error,abs_error
+5ba08900d76e47218f046f5b9ee2158c,2026-11-17T00:39:20,2026-11-16,2026-11-13,2.824,2.8233,-0.00023651316810811057,0.4608999999999999,0.5391000000000001,2026Q3,2026-09-30,2026-10-21,True,False,estimated-disclosure,eastmoney-page,low,partial,,,
