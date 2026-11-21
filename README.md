@@ -211,53 +211,10 @@ to `launch_stdout.log`.
 
 ## Usage
 
-### GUI (recommended)
-
-```bash
-python fund_analyzer_gui.py
-```
-
-1. Enter a **fund code** (6 digits, e.g. `017436`).
-2. Optionally set **benchmark**, **risk-free rate**, **start date**
-   (`YYYY-MM-DD`) and output directory.
-3. Leave **「忽略緩存（強制刷新）」** checked to bypass the holdings cache, or
-   uncheck it to reuse a cache younger than 7 days.
-4. Click **「開始分析」** (AUM is fetched automatically).
-5. From there: **「打开综合报告」** for the combined HTML report,
-   **「盘后监控」** for the 60-second post-market monitor, **「QDII 淨值估算」**
-   for the handover estimate, or double-click any result file.
-
-The other tabs are described in [GUI overview](#gui-overview).
-
-### Command line
-
-```bash
-python fund_analyzer.py <fund_code> [options]
-```
-
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `--output DIR` | `output` | Output root directory |
-| `--benchmark CODE` | `.NDX` | Benchmark index; `""` skips IR and the excess-return chart |
-| `--benchmark-market` | `auto` | `auto` / `us` / `cn` / `hk` |
-| `--risk-free RATE` | `0.02` | Annual risk-free rate |
-| `--start-date DATE` | — | Tracking start date (`YYYY-MM-DD`) |
-| `--fund-type TYPE` | `auto` | `auto`, `standard` or `qdii` (force the estimate) |
-| `--qdii-as-of TIME` | now | Base time for the QDII estimate (`YYYY-MM-DD[THH:MM]`) |
-| `--qdii-backtest` | — | Score stored estimates against published NAV (MAE / RMSE) |
-| `--no-cache` | — | Ignore the holdings cache |
-| `--show` | — | Open all HTML reports in the browser |
-| `-v, --verbose` | — | DEBUG logging |
-
-```bash
-python fund_analyzer.py 017436 --risk-free 0.02 --benchmark .NDX --show
-python fund_analyzer.py 017436 --start-date 2023-01-01 --show
-python fund_analyzer.py 000369 --fund-type qdii
-python fund_analyzer.py 000369 --qdii-backtest
-```
-
-Strategy backtests, stored-report rendering and data maintenance have their own
-scripts — see [Strategy backtesting](#strategy-backtesting).
+Start the GUI with `python fund_analyzer_gui.py` (or `launch.vbs`); the CLI is
+`python fund_analyzer.py <fund_code> [options]`. A walkthrough of the four areas,
+the full CLI option table and the estimation-scoring flow are in
+[`docs/usage.md`](docs/usage.md).
 
 ## Fund analysis
 
@@ -638,62 +595,10 @@ a normal user installation is not affected.
 
 ## Troubleshooting
 
-### SSL error while fetching data
-
-```
-SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING]'))
-```
-
-This is usually a network problem with the Eastmoney `fundf10` CDN, not the code.
-The fund home page is tried first (one request, normally succeeds); then the
-archive API with 3 attempts per year and backoff; then the last on-disk snapshot,
-so the run still produces charts and — for a QDII fund — an estimate. Since V2.1
-the failure is classified before logging:
-
-```
-[000369] 2026 年持仓获取失败（已重試 3 次）: TLS 握手階段被中斷（網絡路徑 / 中間設備 / 對端 CDN 問題，非程式錯誤）（APIError）
-```
-
-Categories: TLS handshake interrupted, connection closed by peer, timeout, DNS
-failure, other. If it says TLS the request never reached Eastmoney — check proxies
-and a raw handshake before adding retries; retrying a broken TLS path only adds
-~50 s per run. The archive host is the only source of per-quarter history, which
-is why the QDII flow no longer depends on it.
-
-An estimate reports `status: "insufficient-data"` and the CLI prints
-`未產生估算：目標日 … 之前尚無已披露的 QDII 持倉` when every portfolio source
-failed, or when the only snapshots were disclosed **after** the target date
-(look-ahead protection).
-
-### The program seems to hang
-
-Some hosts accept the connection and stall in the TLS handshake.
-`FA_REQUEST_TIMEOUT` (default 30 s) bounds this:
-
-```cmd
-set FA_REQUEST_TIMEOUT=15
-python fund_analyzer.py 017436 -v
-```
-
-### `ModuleNotFoundError: No module named 'fund_analyzer'`
-
-Run from the folder that contains `fund_analyzer.py`, or set the shortcut's
-**Start in** field to the project folder.
-
-### GUI closes immediately
-
-Run `python fund_analyzer_gui.py` in a terminal to see the error. Under
-`pythonw.exe` the traceback goes to `crash.log` and `gui_debug.log` instead.
-
-If neither file has a traceback, the process died inside a native library
-(Windows event log shows e.g. `0xC06D007F` in `KERNELBASE.dll`); check
-`fatal.log`, written by `faulthandler`.
-
-### The combined report does not open
-
-`pywebview` is optional; without it the report opens in the default browser. If
-neither works, open `<code>_master_report.html` manually — it embeds the
-individual reports as iframes.
+Common failures — Eastmoney `SSLEOFError` / TLS handshake, a hang bounded by
+`FA_REQUEST_TIMEOUT`, `ModuleNotFoundError`, a GUI that closes immediately, a
+combined report that will not open — and how to read `crash.log` / `fatal.log`
+are covered in [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ## Benchmark reference
 
@@ -791,6 +696,8 @@ five log files, and `python_path.txt` (optional interpreter override for
 | [`docs/development/stageE_bt_matrix.md`](docs/development/stageE_bt_matrix.md) | BT-01…BT-14 backtest evidence matrix |
 | [`docs/development/release_manifest_v2.4.0.md`](docs/development/release_manifest_v2.4.0.md) | Tag/commit, test environment, coverage, artefact verification |
 | [`docs/development/backlog.md`](docs/development/backlog.md) | Non-blocking notes for the next developer |
+| [`docs/usage.md`](docs/usage.md) | GUI walkthrough, full CLI reference and estimation scoring |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Failure symptoms, log files and fixes |
 | [`docs/technical_specification/V2/`](docs/technical_specification/V2/) | Specifications: roadmap, database schema, testing, FX pipeline, backtest engine, GUI integration |
 
 The full backtest design (fingerprint content, execution rules, metric
