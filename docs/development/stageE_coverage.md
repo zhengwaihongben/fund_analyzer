@@ -4,7 +4,7 @@ Measured by `scripts/coverage_core.py` with `sys.settrace` while running the
 whole `unittest` suite in-process, because the project does not depend on the
 `coverage` package. **Line coverage only, not branch coverage.**
 
-- Generated: 2026-11-21T07:37:33+00:00
+- Generated: 2026-11-21T11:13:29+00:00
 - Python: 3.10.9
 - Tests run: 992, failures: 0, errors: 0
 - GUI tests excluded from the measurement: test_gui (Tk teardown aborts the interpreter under `sys.settrace`)
