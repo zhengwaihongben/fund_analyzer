@@ -5,6 +5,10 @@ from `docs/technical_specification/V2/10_v232_backtest_engine.md` §11 and the
 artefact that demonstrates it. Acceptance is the lead's decision; this matrix
 records evidence, not a verdict.
 
+**Acceptance record:** V2.3.2 Stage E accepted 2026-11-21 — BT-01…BT-14 all
+PASS, the regression set stayed green (423 BT-related tests OK, full suite
+1131 OK), and core coverage is 704/708 = 99.4 % (E-12).
+
 | ID | Criterion (short) | Evidence | Result |
 | --- | --- | --- | --- |
 | BT-01 | Every engine price/FX read is PIT | `fa/backtesting/data_access.py` (`prices` → `Repository.prices_as_of`, `fx` → `fx_as_of`, no `load_prices`); `tests/test_backtest_data_access.py::PriceAccessTests::test_load_prices_is_never_called`; `tests/test_backtest_engine.py::IsolationTests` (AST scan); `scripts/smoke_backtest_real.py` trade-price check | PASS |

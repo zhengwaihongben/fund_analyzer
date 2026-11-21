@@ -174,15 +174,15 @@ result line for each of A-01…A-09 are recorded in
 
 | C-13 | A second run while one is running is refused (`state="running"`) | A | `…::WindowTests::test_second_submit_is_refused_while_running` | pass |
 
-| C-14 | UI stays responsive during a run (poll loop keeps running) | M | `v24_evidence/C-stage.md` §3 (423 ticks, max 27 ms) — manual pass required | pending |
+| C-14 | UI stays responsive during a run (poll loop keeps running) | A | Covered by Stage E: `v24_evidence/E-06.md` (`progress → progress → result`, exactly one terminal result) and `v24_evidence/E-01.md` (the window answered throughout the run); the Stage C scripted run recorded 423 heartbeats with max 27 ms lateness (`C-stage.md` §3) | pass (covered by E-01/E-06) |
 
 | C-15 | Closing during a run waits at most 2 s; worker never touches a destroyed widget (T-7) | A + R | `tests/test_gui_lifecycle.py::BacktestCloseBudgetTests::test_gui_close_during_run_bounded_wait` | pass |
 
 | C-16 | Engine/metrics/runner files unchanged (SHA-256) | R | `v24_evidence/C-16.json` — 8/8 engine files byte-identical | pass |
 
-| C-17 | Real desktop run on the working database produces a readable summary | M | `v24_evidence/C-17_report.json` + `C-17_running.png` — manual pass required | pending |
+| C-17 | Real desktop run on the working database produces a readable summary | A | `v24_evidence/E-01.md` §2 — real 000369 backtest on the working database, `created=False` reuse, summary and every result tab rendered; `v24_evidence/C-17_report.json` + `C-17_running.png` | pass (covered by E-01) |
 
-| C-18 | The run created in C-17 is traceable: run id → inputs → fingerprint shown in the GUI | M | `v24_evidence/C-17_report.json` (`fingerprint_visible: true`) — manual pass required | pending |
+| C-18 | The run created in C-17 is traceable: run id → inputs → fingerprint shown in the GUI | A | `v24_evidence/E-01.md` §2/§4 — run `2b450179…`, fingerprint visible, spec id/period/capital shown; `C-17_report.json` (`fingerprint_visible: true`) | pass (covered by E-01) |
 
 | C-19 | Cost mode and runtime configuration: default keeps `COST_MODEL_DEFAULT`, custom builds an explicit `CostModel`; runtime panel read-only | A | `…::RuntimePanelTests`, `…::SentinelTests`, `…::test_cost_mode_switch_enables_the_cost_entries` | pass |
 
@@ -214,7 +214,7 @@ result line for each of A-01…A-09 are recorded in
 
 | D-09 | History is immutable: table row hashes unchanged before/after browsing and exporting | A | `tests/test_application_reporting.py::…::test_d09_browsing_and_export_do_not_change_rows` | pass |
 
-| D-10 | Real desktop: open an old run from history, export it and open the file | M | `docs/development/v24_evidence/D-10.md` | pending — export exercised in E-10 (3,381 B estimate + 3,140 B backtest reports, `E-10/history_window.png`); opening the exported file by double-click was **not** exercised in this scripted session |
+| D-10 | Real desktop: open an old run from history, export it and open the file | M | `docs/development/v24_evidence/D-10.md`; export proven in `v24_evidence/E-10.md` (3,381 B backtest + 3,140 B estimate report) | pending (environment only: this VM has no `.md` association, so the exported files were verified by size/content, not by double-click) |
 
 | D-11 | `Repository.list_backtest_runs(spec_id=None, limit=50)`: documented columns, `created_at DESC, run_id DESC`, limit 1..200, spec filter, read-only, consistent with `load_backtest_run` | A | `tests/test_reports_history.py::HistoryQueryTests` (5 tests) | pass |
 

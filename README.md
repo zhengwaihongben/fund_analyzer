@@ -663,3 +663,10 @@ This tool is for **educational and research purposes only**. Data is fetched fro
 ## License
 
 [MIT](./LICENSE)
+
+## Development records
+
+- `docs/development/fund_analyzer_project_overview.md` — project overview, plan and current status (hand-off document).
+- `docs/development/v24_acceptance_matrix.md` — Stage 0/A/B/C/D/E acceptance matrix with per-item evidence.
+- `docs/development/backlog.md` — non-blocking review notes kept for the next developer.
+- `docs/development/v24_evidence/` — the Stage E evidence files and screenshots.
