@@ -669,3 +669,4 @@ This tool is for **educational and research purposes only**. Data is fetched fro
 - `docs/development/v24_acceptance_matrix.md` — Stage 0/A/B/C/D/E acceptance matrix with per-item evidence.
 - `docs/development/backlog.md` — non-blocking review notes kept for the next developer.
 - `docs/development/v24_evidence/` — the Stage E evidence files and screenshots.
+- `docs/development/release_manifest_v2.4.0.md` — tag/commit, test environment, coverage, artefact and the D-10 waiver for this release.
