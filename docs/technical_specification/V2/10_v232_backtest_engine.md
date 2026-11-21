@@ -6,12 +6,11 @@ Stage A — Price PIT Foundation: **accepted** (§15).
 Stage B — Models & Data Access: **accepted** (§16).
 Stage C — Engine & Costs: **accepted** (§17).
 Stage D — Metrics, Runner & Schema: **accepted** (2026-11-20, Round 9; §18).
-Stage E — Integration & Acceptance: **delivered 2026-11-20, pending final
-independent acceptance** (§19).
+Stage E — Integration & Acceptance: **accepted 2026-11-21** (§19; delivered 2026-11-20).
 
 The lead accepted the six decisions in §13 and chose option (a) for Q7 (§13.1).
-Stages A–D have completed independent review and are accepted. Stage E has been
-delivered and is awaiting final independent acceptance. V2.4 has not started.
+Stages A–E have completed independent review and are accepted (Stage E accepted
+2026-11-21, §19.7). V2.4 has not started.
 This revision corrected the execution-instant rule (§5.3), replaced the
 range-summary fingerprint with a content fingerprint (§4.4), added
 `initial_capital` (§4.1) and wrote down the re-adjusted-history rule (§5.10).
@@ -1277,7 +1276,7 @@ for the whole suite (41.2 s), `compileall` and `git diff --check` clean.
 
 ---
 
-## 19. Stage E status — delivered 2026-11-20 (pending final independent acceptance)
+## 19. Stage E status — delivered 2026-11-20, accepted 2026-11-21
 
 Stage E is integration and acceptance only: no engine, cost, metric or schema
 rule changed. Everything below reads the code that Stages A–D delivered.
@@ -1382,8 +1381,8 @@ The working database gained two smoke runs and one CLI demo run
     rows whose `holding_date` does not parse, so the guard only fires for a
     selection dict built by hand. It is kept because a bad snapshot must not
     abort an estimate.
-- Stage D was **accepted** in the Round 9 review (2026-11-20). Stage E is
-  **delivered but not declared accepted**; only the lead can close it.
+- Stage D was **accepted** in the Round 9 review (2026-11-20); Stage E was
+  **accepted on 2026-11-21** — see §19.7.
 
 ### 19.5 Round-8 review fixes (2026-11-20)
 
@@ -1411,5 +1410,20 @@ Verification after these fixes (Python 3.10.9): `python scripts/coverage_core.py
 846 tests `OK`; `python -m compileall -q fa tests scripts fund_analyzer.py
 fund_analyzer_gui.py` → exit 0; `git diff --check` → exit 0.
 
-Stage status after Round 9: A, B, C and **D accepted**; **E delivered, pending
-independent acceptance**; V2.4 not started.
+Stage status after Round 9 (historical record): A, B, C and **D accepted**;
+**E delivered, pending independent acceptance**; V2.4 not started. *Superseded by
+§19.7: Stage E was accepted on 2026-11-21 and V2.4 Stages 0–E were accepted on
+the same day.*
+### 19.7 Stage E acceptance (2026-11-21)
+
+The independent review of the V2.4 release confirmed and accepted the Stage E
+deliverables: `scripts/accept_backtest_synthetic.py` (30/30), `scripts/smoke_backtest_real.py`,
+`scripts/backtest_report.py` (`run`/`list`/`show` over persisted runs),
+`scripts/audit_backtest_retention.py` (7/7) and `scripts/audit_working_db.py`,
+together with the BT-01…BT-14 matrix (`docs/development/stageE_bt_matrix.md`, 423
+tests) and the coverage report (704/708 = 99.4 %, 10/10 gate modules ≥ 90 %).
+
+Stage status after this record: **A, B, C, D and E accepted — V2.3.2 is closed.**
+V2.4 Stages 0–E were accepted on the same day; see
+`docs/development/release_manifest_v2.4.0.md`.
+

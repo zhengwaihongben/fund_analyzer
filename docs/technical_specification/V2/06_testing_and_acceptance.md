@@ -87,8 +87,9 @@ a defensive branch documented in the V2.3.2 specification §19.4.
 
 **The 90 % coverage gate is met.**
 
-Stage status: A, B, C and D **accepted**; **Stage E delivered, pending
-independent final acceptance**; V2.4 not started.
+Stage status: V2.3.2 Stages A, B, C, D and **E all accepted** (Stage E accepted
+2026-11-21); **V2.4 Stages 0–E accepted 2026-11-21**. No further plan version is
+scheduled.
 
 ## 4. Test data
 

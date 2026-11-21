@@ -515,9 +515,8 @@ back from the database, so a report is traceable to its run. Acceptance helpers:
 *Initial Stage E delivery, before Round 8 fixes:* the gate was not met — the
 tracer reported 88.2 %, with `fa/analysis/returns/base.py`,
 `fa/analysis/returns/fx.py` and `fa/analysis/nav_estimator.py` below the
-threshold. After the Round 8 coverage work the gate is met (see below). Stage D
-was accepted in Round 9; Stage E is delivered but pending independent
-acceptance.
+threshold. After the Round 8 coverage work the gate is met (see below). Stage D was accepted in Round 9 and **Stage E was accepted on 2026-11-21**,
+which closes V2.3.2.
 
 ## Tests
 

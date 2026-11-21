@@ -1,9 +1,8 @@
 # V2.4 — GUI Integration Technical Specification
 
-Status: **revised draft, round 2** (2026-11-20, after the independent Stage 0
-review). Stage 0 remains open until this document and
-`docs/development/v24_acceptance_matrix.md` pass review; **no functional code
-has been written for V2.4**.
+Status: **approved and frozen baseline** (Stage 0 accepted 2026-11-20, round 3
+review). Implementation status is tracked in `07_development_roadmap.md`; this
+document is the frozen contract for Stages A–E.
 
 Related: `00_overview.md` (§7 index), `05_module_interfaces.md`,
 `06_testing_and_acceptance.md`, `07_development_roadmap.md` (§V2.4),

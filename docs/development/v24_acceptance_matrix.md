@@ -2,9 +2,8 @@
 
 
 
-Status: **revised draft, round 2** (2026-11-20, after the independent Stage 0
-
-review). Every row starts as `pending`; a stage is accepted only when all of its
+Status: **approved and frozen baseline** (Stage 0 accepted 2026-11-20, round 3
+review) — implementation status is tracked in `07_development_roadmap.md`. Every row starts as `pending`; a stage is accepted only when all of its
 
 rows are `pass` with the named evidence present in the package.
 
@@ -214,7 +213,7 @@ result line for each of A-01…A-09 are recorded in
 
 | D-09 | History is immutable: table row hashes unchanged before/after browsing and exporting | A | `tests/test_application_reporting.py::…::test_d09_browsing_and_export_do_not_change_rows` | pass |
 
-| D-10 | Real desktop: open an old run from history, export it and open the file | M | `docs/development/v24_evidence/D-10.md`; export proven in `v24_evidence/E-10.md` (3,381 B backtest + 3,140 B estimate report) | pending (environment only: this VM has no `.md` association, so the exported files were verified by size/content, not by double-click) |
+| D-10 | Real desktop: open an old run from history, export it and open the file | M | `docs/development/v24_evidence/D-10.md`; export proven in `v24_evidence/E-10.md` (3,381 B backtest + 3,140 B estimate report) | **waived** (lead-approved 2026-11-21): the VM has no `.md` file association, so "double-click to open" cannot be exercised; the same flow (list → detail → export) has real GUI evidence in E-01/E-10 and the waiver is recorded in `docs/development/release_manifest_v2.4.0.md` |
 
 | D-11 | `Repository.list_backtest_runs(spec_id=None, limit=50)`: documented columns, `created_at DESC, run_id DESC`, limit 1..200, spec filter, read-only, consistent with `load_backtest_run` | A | `tests/test_reports_history.py::HistoryQueryTests` (5 tests) | pass |
 

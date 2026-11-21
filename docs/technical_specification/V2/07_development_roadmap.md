@@ -442,7 +442,7 @@ looking absent, and the PIT benchmark (`benchmark.py`, `benchmark_base` on the
 equity curve, benchmark rows in the fingerprint). That round added 29 tests
 (`test_backtest_benchmark`, `test_backtest_run_identity`,
 `test_backtest_data_integrity`); suite 781. Round 3 made the benchmark read session by session and put its FX in the fingerprint, and added the `COST_MODEL_DEFAULT` sentinel for explicit costs; round 4 removed `revision_id` from the payload (database bookkeeping, not a market input), rebuilt `data_fingerprint(sessions=..., lag_minutes=...)` so every decision instant hashes only what was visible then (momentum lookback included, the FX rate used recorded per session, missing markers per session, integrity still aborting), and made the benchmark value with `adj_close` when present, recording `price_source`. FX still has no version ledger (Q7), so an in-place FX correction reaches earlier instants; that limitation is documented and pinned by a test rather than hidden. Round 5 made the strategy fragment describe the FX the engine actually consumed: `fx_rate()` (which falls back to an older observation) with the observation date recorded, a momentum window taken per instrument instead of from the first universe entry's calendar, and no `fetched_at` in the payload, so a re-download that only refreshes the fetch time cannot invalidate a run; the spec header records Stage D as pending final acceptance and Stage E as unauthorised. Round 7 split the price roles: a shut venue no longer suppresses the momentum window on a rebalance day (P1-17), and `session_price` is documented as a conservative superset of the prices the engine could use (P2-17); the block is exposed through `fingerprint_session_payload()` so tests assert role composition directly.
-Stage E (CLI/report surface, benchmark curve, retention) is **delivered 2026-11-20, pending final independent acceptance** — see
+Stage E (CLI/report surface, benchmark curve, retention) was **delivered 2026-11-20 and accepted 2026-11-21** — see
 §19 of `10_v232_backtest_engine.md` and `docs/development/stageE_bt_matrix.md`.
 Delivered artefacts: `scripts/accept_backtest_synthetic.py` (30 hand-checked
 assertions over five scenarios), `scripts/audit_working_db.py`,
@@ -466,8 +466,7 @@ two-year ingestion command is documented in §12.1. Current result: **846
 tests**, coverage **99.4 %** (704/708) with every documented module ≥ 90 %
 (`returns/base.py` 98.1 %, `nav_estimator.py` 99.7 %, the rest 100 %); the four
 remaining defensive lines are listed in `docs/development/stageE_coverage.md`.
-Stage D was independently accepted in the Round 9 review; **Stage E is
-delivered but pending independent acceptance** — the lead's review decides.
+Stage D was independently accepted in the Round 9 review; **Stage E was accepted on 2026-11-21**, which closes V2.3.2.
 
 Then the engine stages: models and PIT-only access → rebalance/trade/equity
 simulation with costs → metrics, runner and Migration 004

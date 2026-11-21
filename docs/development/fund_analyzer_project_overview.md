@@ -275,11 +275,18 @@ Stage B 只有在 B-01 至 B-17 的驗收條件均有證據支持後，才可宣
 
 ---
 
-## 7. 接下來的開發計劃
+## 7. V2.4 計劃回顧與後續方向
 
-建議按依賴順序推進，避免 GUI、服務層及報告層同時大幅修改。
+> **本節是歷史記錄。** 第一至第四階段（Stage B、C、D、E）均已完成並接受
+> （2026-11-21），各階段驗收見 §10 與 `docs/development/v24_acceptance_matrix.md`。
+> 下列「預計工作」清單保留開發當時的規劃，**不是待辦事項**；
+> 未排入 V2.4 的改善項目記錄在 `docs/development/backlog.md`。
 
-> 更新（2026-11-21）：第一階段及 Stage C、D 已完成；目前進行 Stage E，剩餘為 E-01～E-10 的 Windows 桌面人工驗證。
+建議按依賴順序推進，避免 GUI、服務層及報告層同時大幅修改（歷史說明）。
+
+> 更新（2026-11-21）：Stage B、C、D、E 均已完成並接受；E-02 經延遲啟動修正後
+> 中位數 1.547 s；D-10 因本機無 `.md` 關聯，以人工豁免（waiver）結案。
+> V2.4 計劃結束，沒有 V2.5。
 
 ### 第一階段：完成 Stage B（已完成）
 
@@ -291,7 +298,7 @@ Stage B 只有在 B-01 至 B-17 的驗收條件均有證據支持後，才可宣
 6. B-17 SQLite read-back／History 即時可見性已完成；B-16 Windows 人工測試併入 Stage E。
 7. B-01 至 B-17 驗收矩陣已更新；B-16 於 Stage E 完成後收斂。
 
-### 第二階段：Stage C — Backtesting GUI
+### 第二階段：Stage C — Backtesting GUI（已完成 2026-11-21）
 
 預計工作：
 
@@ -303,7 +310,7 @@ Stage B 只有在 B-01 至 B-17 的驗收條件均有證據支持後，才可宣
 - 執行設定與結果的可追溯呈現；
 - 使用既有回測服務及 Repository，不重寫回測引擎。
 
-### 第三階段：Stage D — Reports & History
+### 第三階段：Stage D — Reports & History（已完成 2026-11-21）
 
 預計工作：
 
@@ -313,7 +320,7 @@ Stage B 只有在 B-01 至 B-17 的驗收條件均有證據支持後，才可宣
 - 共用報告 renderer，避免 CLI 與 GUI 產生兩套不同的報告邏輯；
 - 確認報告中的成本、資料來源、日期及執行識別資訊不超出已保存資料所能支持的範圍。
 
-### 第四階段：Stage E — Integration & Acceptance
+### 第四階段：Stage E — Integration & Acceptance（已完成 2026-11-21）
 
 預計工作：
 
@@ -384,4 +391,10 @@ git diff --check
 | V2.4 Stage D（報告及歷史） | 已完成並接受 |
 | V2.4 Stage E（整合驗收） | E-01～E-13 通過；D-10 因 VM 無 `.md` 關聯，降為人工走查註記 |
 
-**目前最直接的下一步：V2.4 不再開新開發批次。** 若要收斂矩陣，只需在 D-10 註明「VM 無 `.md` 關聯，改用明確檢視器開啟」或保留 pending；兩者都不涉及程式或測試。
+**目前最直接的下一步：V2.4 不再開新開發批次。** D-10 已於 2026-11-21 以人工豁免（waiver）記錄在驗收矩陣與 `docs/development/release_manifest_v2.4.0.md`；剩下的非阻擋項目見 `docs/development/backlog.md`。
+### 後續方向
+
+V2.4 是現行路線圖的最後一個版本，沒有 V2.5。未排入本計畫的改善項目
+（GUI 細節、報告格式、覆蓋率以外的測試、D-10 環境限制的長期解法等）集中記錄在
+`docs/development/backlog.md`，不屬於任何已接受的驗收項目，也不阻擋 V2.4 結案。
+
